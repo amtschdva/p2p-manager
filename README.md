@@ -17,6 +17,23 @@ ported to **`p2p-app`** with module gating stripped (everything always on in
 classic). A cross-app feature should land as a single commit touching both
 directories, so the two builds never silently drift.
 
+## Drift check
+
+`tools/check-drift.sh` enforces that the two builds stay in lockstep. It
+verifies that the shared modules (`journal.js`, `approvals.js`, `seed.js`,
+`gst-states.js`, the CSS/HTML) are byte-identical, that the API route
+inventories match exactly, that the two SPAs differ only in the
+module-gating scaffolding, that every test exists in both suites (except the
+modular-only gating test), and that the schemas differ only by the planned
+inventory-module tables. Intentional differences are allowlisted in the
+script itself, each with a reason.
+
+It runs automatically as a pre-commit hook. **Enable it once per clone:**
+
+```bash
+git config core.hooksPath tools/githooks
+```
+
 ## Development
 
 Both apps expect the shared Postgres 16 container (`p2p-postgres`, host port

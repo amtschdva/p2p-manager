@@ -1242,7 +1242,7 @@ app.get('/api/invoices/:id', requireAuth, wrap(async (req, res) => {
   inv.my_action = null;
   if (inv.status === 'pending') {
     const step = await approvals.currentStep('invoice', inv.id);
-    if (step && await approvals.canAct(req.user, step, inv.department_id)) {
+    if (step && await approvals.canAct(req.user, step, inv.department_id, inv.created_by)) {
       const remaining = inv.approval_chain.filter((s) => s.status === 'pending').length;
       inv.my_action = remaining <= 1 ? 'final' : 'step';
     }
