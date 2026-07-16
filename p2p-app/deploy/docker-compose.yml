@@ -1,0 +1,102 @@
+# Production deployment: Traefik (TLS via Let's Encrypt) + P2P app.
+#
+# Already running Traefik on this host? Delete the `traefik` service below,
+# replace the `p2p` network with your existing Traefik network (external: true),
+# and keep only the app service + labels.
+#
+# Usage:
+#   cp .env.example .env   # then edit DOMAIN, ACME_EMAIL, JWT_SECRET
+#   docker compose up -d --build
+
+services:
+  traefik:
+    image: traefik:v3.4
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-letsencrypt:/letsencrypt
+    networks:
+      - p2p
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=p2p
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=p2p
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U p2p"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - p2p
+
+  app:
+    build:
+      context: ..
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET}
+      - DATABASE_URL=postgres://p2p:${POSTGRES_PASSWORD}@postgres:5432/p2p
+      - APP_URL=${APP_URL:-https://${DOMAIN}}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_SECURE=${SMTP_SECURE:-0}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+    volumes:
+      # SQLite db, vendor invoice uploads and backups all live here — back this directory up
+      - ../data:/app/data
+    networks:
+      - p2p
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.p2p.loadbalancer.server.port=9138
+
+      # --- vendor-facing routes: always public ---
+      - traefik.http.routers.p2p-vendor.rule=Host(`${DOMAIN}`) && (PathPrefix(`/vendor`) || PathPrefix(`/api/vendor`) || PathPrefix(`/css`) || PathPrefix(`/js`) || PathRegexp(`^/api/invoices/[0-9]+/attachment`))
+      - traefik.http.routers.p2p-vendor.priority=20
+      - traefik.http.routers.p2p-vendor.entrypoints=websecure
+      - traefik.http.routers.p2p-vendor.tls.certresolver=letsencrypt
+      - traefik.http.routers.p2p-vendor.service=p2p
+
+      # --- staff app + staff APIs: everything else on the domain ---
+      - traefik.http.routers.p2p-staff.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.p2p-staff.priority=10
+      - traefik.http.routers.p2p-staff.entrypoints=websecure
+      - traefik.http.routers.p2p-staff.tls.certresolver=letsencrypt
+      - traefik.http.routers.p2p-staff.service=p2p
+
+      # RECOMMENDED: restrict the staff app to office/VPN IPs.
+      # Set STAFF_ALLOWED_IPS in .env (comma-separated CIDRs) and uncomment:
+      # - traefik.http.middlewares.staff-allowlist.ipallowlist.sourcerange=${STAFF_ALLOWED_IPS}
+      # - traefik.http.routers.p2p-staff.middlewares=staff-allowlist
+
+networks:
+  p2p:
+
+volumes:
+  traefik-letsencrypt:
+  pgdata:

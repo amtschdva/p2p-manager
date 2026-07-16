@@ -1,0 +1,26 @@
+{
+  "name": "p2p-app-modular",
+  "version": "2.0.0",
+  "description": "Procure-to-Pay management web application — modular edition (license-gated modules: tax, payments, vendor portal; inventory schema prepared)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "start:vendor": "node src/vendor-server.js",
+    "dev": "node --watch src/server.js",
+    "seed": "node src/seed.js --reseed",
+    "test": "node --test tests/api.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.5.2",
+    "helmet": "^8.2.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0",
+    "nodemailer": "^9.0.3",
+    "otplib": "^12.0.1",
+    "pg": "^8.22.0",
+    "qrcode": "^1.5.4"
+  }
+}

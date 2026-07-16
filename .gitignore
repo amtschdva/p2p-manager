@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+
+# runtime data — uploads, vendor KYC/TDS documents, branding, DB dumps.
+# Never committed: contains client documents and backups.
+data/
+
+# environment/secrets
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+*.log
+
+# build artifacts
+*.tar.gz

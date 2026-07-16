@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>P2P Manager — Procure to Pay</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- Login screen -->
+  <div id="login-screen" class="login-screen hidden">
+    <div class="login-card">
+      <img src="/logo" alt="Company logo" class="brand-logo brand-logo-login" onerror="this.style.display='none'">
+      <div class="login-logo">P2P<span>Manager</span></div>
+      <p class="login-sub">Procure-to-Pay Management</p>
+      <form id="login-form">
+        <label>Username
+          <input type="text" id="login-username" autocomplete="username" required>
+        </label>
+        <label>Password
+          <input type="password" id="login-password" autocomplete="current-password" required>
+        </label>
+        <div id="login-error" class="form-error hidden"></div>
+        <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+      </form>
+      <form id="totp-form" class="hidden">
+        <label>Authenticator code
+          <input type="text" id="totp-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+                 placeholder="6-digit code" autocomplete="one-time-code" required>
+        </label>
+        <div id="totp-error" class="form-error hidden"></div>
+        <button type="submit" class="btn btn-primary btn-block">Verify</button>
+        <button type="button" id="totp-back" class="btn btn-block" style="margin-top:8px">← Back</button>
+      </form>
+      <div class="login-hint">
+        Demo accounts: <code>admin/admin123</code>, <code>priya/priya123</code> (procurement),<br>
+        <code>rahul/rahul123</code> (finance), <code>meera/meera123</code> (approver), <code>vikram/vikram123</code> (requester)
+      </div>
+      <div style="text-align:center;margin-top:16px;font-size:13px">
+        Are you a supplier? <a href="/vendor" style="color:#2563eb;font-weight:600">Vendor portal →</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- App shell -->
+  <div id="app-shell" class="app-shell hidden">
+    <aside class="sidebar">
+      <img src="/logo" alt="Company logo" class="brand-logo brand-logo-sidebar" onerror="this.style.display='none'">
+      <div class="sidebar-logo">P2P<span>Manager</span></div>
+      <nav id="nav"></nav>
+      <div class="sidebar-footer">
+        <div id="user-badge" class="user-badge"></div>
+        <button id="btn-change-pw" class="btn btn-ghost btn-sm">Change password</button>
+        <button id="btn-2fa" class="btn btn-ghost btn-sm">Two-factor auth</button>
+        <button id="btn-logout" class="btn btn-ghost btn-sm">Sign out</button>
+      </div>
+    </aside>
+    <main id="main" class="main"></main>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal" id="modal">
+      <div class="modal-header">
+        <h3 id="modal-title"></h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

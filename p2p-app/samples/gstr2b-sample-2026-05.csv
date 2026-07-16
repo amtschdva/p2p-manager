@@ -1,0 +1,4 @@
+supplier_gstin,supplier_name,invoice_no,invoice_date,taxable_value,cgst,sgst,igst
+29AABCT1234F1Z5,TechSupply Solutions Pvt Ltd,TS/2026/1189,2026-05-10,963000,86670,86670,0
+07AAACO5678G1Z2,Office Essentials India,OE-8834,2026-05-30,68200,0,0,12376
+33AAHCS2222C1Z7,Sundar Facility Services,SF-1001,2026-05-18,15000,1350,1350,0
