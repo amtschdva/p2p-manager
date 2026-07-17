@@ -109,6 +109,27 @@ module.exports = function register(app) {
   registerCodeMaster('sub_locations', 'sub-locations');
   registerCodeMaster('cost_centres', 'cost-centres');
 
+  // ---------- GL period lock (month-end close) ----------
+  // Everything up to and including the locked month is closed: no JE — invoice
+  // booking, payment, or deposit — may post into it (enforced in journal.js).
+  app.get('/api/settings/gl-lock', requireAuth, wrap(async (req, res) => {
+    const row = await db.prepare(`SELECT value FROM app_settings WHERE key = 'gl_locked_through'`).get();
+    res.json({ locked_through: (row && row.value) || null });
+  }));
+
+  app.put('/api/settings/gl-lock', requireAuth, requireRole('finance'), wrap(async (req, res) => {
+    const value = (req.body.locked_through || '').trim();
+    if (value && !/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) throw new Error('Locked-through period must be a valid month in YYYY-MM format');
+    if (value) {
+      await db.prepare(`INSERT INTO app_settings (key, value) VALUES ('gl_locked_through', ?)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value RETURNING key`).run(value);
+    } else {
+      await db.prepare(`DELETE FROM app_settings WHERE key = 'gl_locked_through'`).run();
+    }
+    audit(req.user.id, 'update', 'gl_period_lock', null, value ? `books closed through ${value}` : 'lock removed');
+    res.json({ ok: true, locked_through: value || null });
+  }));
+
   // ---------- custom field labels (per-client rename of the 5 spare invoice fields) ----------
   app.get('/api/settings/custom-field-labels', requireAuth, wrap(async (req, res) => {
     const rows = await db.prepare(`SELECT key, value FROM app_settings WHERE key LIKE 'custom_field_%_label'`).all();

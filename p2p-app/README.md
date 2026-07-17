@@ -155,6 +155,19 @@ Every action is recorded in an audit log shown on the dashboard.
   domestic RCM categories (legal, GTA, sponsorship…) are selectable. IGST is
   self-assessed (Dr GST Input IGST-RCM / Cr RCM GST Payable) and not payable to
   the vendor.
+- **Duplicate-invoice control**: the same vendor reference can only be
+  recorded once per vendor (case/whitespace-insensitive) across staff entry
+  and the vendor portal; rejected/cancelled invoices don't block a corrected
+  resubmission.
+- **GL period lock (month-end close)**: finance/admin closes the books
+  through a month (Settings → GL period lock). Nothing can post a journal
+  entry — invoice booking, payment release, or tax deposit — into the locked
+  month or earlier; clear the lock to reopen.
+- **TDS rate discipline**: at final approval the rate must match the section
+  master (or, when a lower-deduction certificate is claimed, exactly the
+  certificate's rate). Finance can deviate from the master only with an
+  explicit override reason, which is recorded in the audit trail. The GL
+  period must also be a valid YYYY-MM month.
 - **Journal entries** are auto-posted, immutable and balanced: booking (AP
   credited **gross** with TDS as a separate AP debit line), payment, and tax
   deposits. Export as CSV or Excel from the Journal page.

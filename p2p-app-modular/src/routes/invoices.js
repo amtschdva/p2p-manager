@@ -9,7 +9,7 @@ const modules = require('../modules');
 const approvals = require('../approvals');
 const { postInvoiceBookingJE, r2 } = require('../journal');
 const { JWT_SECRET, requireAuth, wrap, fmtInr, upload, UPLOAD_DIR, verifyFileSignature, bearerToken } = require('../context');
-const { INV_LIST_SQL, computeMatch, prepareInvoiceTax, prepareReceiptAndDueDate, prepareInvoiceGlFields, visibleDeptIds, canSeeDoc } = require('../lib/queries');
+const { INV_LIST_SQL, computeMatch, prepareInvoiceTax, prepareReceiptAndDueDate, prepareInvoiceGlFields, visibleDeptIds, canSeeDoc, assertNotDuplicateInvoice } = require('../lib/queries');
 const { sendMail, userEmail, stepEmails, vendorEmails } = require('../mailer');
 
 module.exports = function register(app) {
@@ -80,6 +80,7 @@ module.exports = function register(app) {
         // concurrent submissions can't grab the same invoice number
         const { id, invNumber } = await db.tx(async () => {
           const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
+          await assertNotDuplicateInvoice(po.vendor_id, b.vendor_invoice_ref);
           const invId = (await db.prepare(`INSERT INTO invoices
             (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
              place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,
@@ -150,7 +151,7 @@ module.exports = function register(app) {
     // A lower/nil-deduction certificate valid on the invoice date can supply the rate
     // instead of the section's standard master rate (finance can still override).
     let tdsSection = taxModule ? (b.tds_section || '').trim() : '';
-    let tdsRate = 0, tdsAmount = 0, tdsCertificateId = null;
+    let tdsRate = 0, tdsAmount = 0, tdsCertificateId = null, tdsRateOverrideReason = null;
     if (tdsSection && tdsSection.toLowerCase() !== 'none') {
       tdsRate = Number(b.tds_rate);
       if (!(tdsRate >= 0 && tdsRate <= 40)) throw new Error('TDS rate must be between 0 and 40%');
@@ -177,6 +178,7 @@ module.exports = function register(app) {
       costCentre = (b.cost_centre || '').trim() || (dept && dept.default_cost_centre) || null;
       programProductCode = (b.program_product_code || '').trim() || null;
       glPeriod = (b.gl_period || '').trim() || inv.invoice_date.slice(0, 7);
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(glPeriod)) throw new Error('GL period must be a valid month in YYYY-MM format');
       for (let i = 0; i < 5; i++) customFields[i] = (b[`custom_field_${i + 1}`] || '').trim() || null;
     }
 
@@ -203,7 +205,23 @@ module.exports = function register(app) {
             throw new Error(`This certificate's threshold of ₹${cert.threshold_amount} would be exceeded (₹${utilized} already used + ₹${inv.subtotal} on this invoice) — use the standard TDS rate instead`);
           }
         }
+        // claiming a certificate means deducting at exactly its authorised rate
+        if (Math.abs(Number(cert.rate) - tdsRate) > 1e-9) {
+          throw new Error(`Certificate ${cert.certificate_number} authorises exactly ${cert.rate}% — either use that rate or approve without the certificate`);
+        }
         tdsCertificateId = cert.id;
+      } else if (taxModule && tdsSection) {
+        // No certificate: the rate must come from the section master. Finance
+        // may still deviate, but only with an explicit reason that lands in
+        // the audit trail — a mistyped rate should never pass silently.
+        const masterRates = (await db.prepare('SELECT rate FROM tds_sections WHERE section = ? AND active = 1').all(tdsSection))
+          .map((r) => Number(r.rate));
+        if (!masterRates.some((r) => Math.abs(r - tdsRate) < 1e-9)) {
+          tdsRateOverrideReason = (b.tds_rate_override_reason || '').trim();
+          if (!tdsRateOverrideReason) {
+            throw new Error(`TDS rate ${tdsRate}% does not match the ${tdsSection} master rate${masterRates.length === 1 ? '' : 's'} (${masterRates.join('%, ')}%) — provide an override reason to use it anyway`);
+          }
+        }
       }
       await approvals.act('invoice', inv.id, req.user, true, b.comment, inv.department_id);
       await db.prepare(`UPDATE invoices SET status='approved', approved_by=?, tds_section=?, tds_rate=?, tds_amount=?, tds_certificate_id=?,
@@ -219,7 +237,7 @@ module.exports = function register(app) {
       return { jeNumber, tdsAmount, netPayable: r2(updated.total - tdsAmount) };
     });
     audit(req.user.id, 'approve', 'invoice', inv.id,
-      `${inv.invoice_number}${result.jeNumber ? ` (JE ${result.jeNumber})` : ''}`);
+      `${inv.invoice_number}${result.jeNumber ? ` (JE ${result.jeNumber})` : ''}${tdsRateOverrideReason ? ` — TDS rate override to ${tdsRate}%: ${tdsRateOverrideReason}` : ''}`);
     const approvedRecipients = inv.source === 'vendor' ? vendorEmails(inv.vendor_id) : [userEmail(inv.created_by)];
     sendMail(approvedRecipients,
       `Invoice ${inv.invoice_number} approved — net payable ${fmtInr(result.netPayable)}`,

@@ -735,6 +735,81 @@ test('concurrency: parallel submissions get unique numbers; a final approval can
   assert.equal(bookings.length, 1, 'exactly one booking JE');
 });
 
+test('AP controls: duplicate invoices blocked, GL period lock, TDS rate discipline', async () => {
+  const priya = await login('priya', 'priya123');
+  const rahul = await login('rahul', 'rahul123');
+  const sneha = await login('sneha', 'sneha123');
+  const vikram = await login('vikram', 'vikram123');
+  const admin = await login('admin', 'admin123');
+  const mkPo = async (vid) => (await call('POST', '/api/pos', {
+    token: priya, body: { vendor_id: vid, company_gstin_id: 1, items: [{ description: 'Service', quantity: 1, unit: 'EA', unit_price: 1000 }] },
+  })).json.id;
+  const mkInv = async (poId, body) => call('POST', '/api/invoices', {
+    token: sneha, body: { po_id: poId, invoice_date: '2026-07-10', subtotal: 1000, cgst_amount: 0, sgst_amount: 0, ...body },
+  });
+  const clearL1 = async (invId) => {
+    const l1 = await call('POST', `/api/invoices/${invId}/approve`, { token: rahul, body: {} });
+    assert.equal(l1.json.finished, false, l1.text);
+  };
+
+  // --- duplicate detection: same vendor + same ref (case/space-insensitive) is blocked
+  const dupPo = await mkPo(vendorId);
+  const first = await mkInv(dupPo, { vendor_invoice_ref: 'DUP/001' });
+  assert.equal(first.status, 201, first.text);
+  const dup = await mkInv(dupPo, { vendor_invoice_ref: 'dup / 001' });
+  assert.equal(dup.status, 400);
+  assert.match(dup.json.error, /duplicate/i);
+  // the same reference for a DIFFERENT vendor is fine
+  const otherVendorPo = await mkPo(1);
+  const otherVendor = await mkInv(otherVendorPo, { vendor_invoice_ref: 'DUP/001', hsn_sac_code: '998314' });
+  assert.equal(otherVendor.status, 201, otherVendor.text);
+
+  // --- gl_period format is validated at final approval
+  const fmtPo = await mkPo(vendorId);
+  const fmtInv = (await mkInv(fmtPo, {})).json.id;
+  await clearL1(fmtInv);
+  const badPeriod = await call('POST', `/api/invoices/${fmtInv}/approve`, { token: rahul, body: { gl_period: 'July-26' } });
+  assert.equal(badPeriod.status, 400);
+  assert.match(badPeriod.json.error, /YYYY-MM/);
+
+  // --- GL period lock: only finance/admin may set it; posting into a closed month is refused
+  const notFinance = await call('PUT', '/api/settings/gl-lock', { token: vikram, body: { locked_through: '2026-07' } });
+  assert.equal(notFinance.status, 403);
+  const setLock = await call('PUT', '/api/settings/gl-lock', { token: rahul, body: { locked_through: '2026-07' } });
+  assert.equal(setLock.status, 200, setLock.text);
+  const intoLocked = await call('POST', `/api/invoices/${fmtInv}/approve`, { token: rahul, body: { gl_period: '2026-07' } });
+  assert.equal(intoLocked.status, 400);
+  assert.match(intoLocked.json.error, /closed|locked/i);
+  // a later, open period posts fine
+  const intoOpen = await call('POST', `/api/invoices/${fmtInv}/approve`, { token: rahul, body: { gl_period: '2026-08' } });
+  assert.equal(intoOpen.status, 200, intoOpen.text);
+  // payments respect the lock too: releasing into the closed month is refused
+  const pay = await call('POST', '/api/payments', { token: rahul, body: { invoice_id: fmtInv, amount: 500, payment_date: '2026-07-15' } });
+  assert.equal(pay.status, 201, pay.text);
+  const lockedRelease = await call('POST', `/api/payments/${pay.json.id}/release`, { token: admin, body: {} });
+  assert.equal(lockedRelease.status, 400);
+  assert.match(lockedRelease.json.error, /closed|locked/i);
+  const clearLock = await call('PUT', '/api/settings/gl-lock', { token: rahul, body: { locked_through: '' } });
+  assert.equal(clearLock.status, 200, clearLock.text);
+  const reopenedRelease = await call('POST', `/api/payments/${pay.json.id}/release`, { token: admin, body: {} });
+  assert.equal(reopenedRelease.status, 200, reopenedRelease.text);
+
+  // --- TDS rate discipline: deviation from the section master needs an explicit reason
+  const ratePo = await mkPo(vendorId);
+  const rateInv = (await mkInv(ratePo, {})).json.id;
+  await clearL1(rateInv);
+  const oddRate = await call('POST', `/api/invoices/${rateInv}/approve`, {
+    token: rahul, body: { tds_section: '194C', tds_rate: 5, itc_eligibility: 'eligible' },
+  });
+  assert.equal(oddRate.status, 400);
+  assert.match(oddRate.json.error, /override reason/i);
+  const withReason = await call('POST', `/api/invoices/${rateInv}/approve`, {
+    token: rahul, body: { tds_section: '194C', tds_rate: 5, itc_eligibility: 'eligible', tds_rate_override_reason: 'AO order 123/2026' },
+  });
+  assert.equal(withReason.status, 200, withReason.text);
+  assert.equal(withReason.json.tdsAmount, 50); // 1000 @ 5%
+});
+
 test('module gating: a core-only server hides tax, payments and vendor portal', async () => {
   // second instance against the same test DB, with every optional module off
   const gatePort = Number(PORT) + 1;

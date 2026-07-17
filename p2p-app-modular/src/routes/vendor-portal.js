@@ -10,7 +10,7 @@ const { db, audit, nextNumber } = require('../db');
 const modules = require('../modules');
 const { JWT_SECRET, TOKEN_TTL, loginLimiter, registerLimiter, requireVendorAuth, wrap,
         checkPassword, upload, UPLOAD_DIR, verifyFileSignature } = require('../context');
-const { computeMatch, prepareInvoiceTax, prepareReceiptAndDueDate, prepareInvoiceGlFields, GST_STATES } = require('../lib/queries');
+const { computeMatch, prepareInvoiceTax, prepareReceiptAndDueDate, prepareInvoiceGlFields, GST_STATES, assertNotDuplicateInvoice } = require('../lib/queries');
 const { vendorDocUpload, saveVendorDocument, vendorDocsFor } = require('../lib/vendor-docs');
 const approvals = require('../approvals');
 const { sendMail, usersByRole } = require('../mailer');
@@ -181,6 +181,7 @@ module.exports = function register(app) {
         // invoice (no approval chain) can never be left behind
         const { id, invNumber } = await db.tx(async () => {
           const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
+          await assertNotDuplicateInvoice(po.vendor_id, b.vendor_invoice_ref);
           const id = (await db.prepare(`INSERT INTO invoices
             (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
              place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,

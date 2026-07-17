@@ -179,6 +179,21 @@ async function prepareInvoiceGlFields(vendor, body) {
   return { placeOfSupplyCode, placeOfSupplyState, hsnSacCode, glDescription };
 }
 
+// Standard AP control: the same vendor invoice must never be recorded twice.
+// Comparison ignores case and internal whitespace ("INV 001" == "inv001").
+// Rejected/cancelled invoices don't block — a fixed resubmission is fine.
+// Call inside the insert transaction, after nextNumber() (whose advisory lock
+// serializes concurrent submissions), so two copies can't slip in together.
+async function assertNotDuplicateInvoice(vendorId, vendorInvoiceRef) {
+  const ref = (vendorInvoiceRef || '').trim();
+  if (!ref) return; // internal entries without a vendor reference are exempt
+  const dup = await db.prepare(`SELECT invoice_number FROM invoices
+    WHERE vendor_id = ? AND status NOT IN ('rejected', 'cancelled')
+      AND UPPER(REPLACE(COALESCE(vendor_invoice_ref, ''), ' ', '')) = UPPER(REPLACE(?, ' ', ''))`)
+    .get(vendorId, ref);
+  if (dup) throw new Error(`Duplicate invoice: this vendor's reference "${ref}" is already recorded on ${dup.invoice_number}`);
+}
+
 // Department-level visibility for matrix documents (PRs and invoices).
 // Returns null for users who may see everything: finance (they process every
 // document anyway), admin, and procurement (a central function — they convert
@@ -204,5 +219,5 @@ module.exports = {
   PR_LIST_SQL, PO_LIST_SQL, INV_LIST_SQL, PAY_LIST_SQL,
   refreshPoReceiptStatus, computeMatch, prepareInvoiceTax,
   prepareReceiptAndDueDate, prepareInvoiceGlFields, GST_STATES,
-  visibleDeptIds, canSeeDoc,
+  visibleDeptIds, canSeeDoc, assertNotDuplicateInvoice,
 };

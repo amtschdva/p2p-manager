@@ -1400,6 +1400,8 @@ async function openApproveModal(inv) {
           </select></div>
         ${inv.rcm ? `<div class="field"><label>Self-assessed IGST under RCM (₹)</label>
           <input name="rcm_igst" id="ap-rcm-igst" type="number" min="0" step="any" value="${inv.igst_amount}"></div>` : ''}
+        <div class="field full"><label>TDS rate override reason <span style="color:var(--text-muted);font-weight:400">(required only if the rate differs from the section master)</span></label>
+          <input name="tds_rate_override_reason" placeholder="e.g. AO order dated …"></div>
       </div>
       <div id="ap-cert-note" style="display:none;background:#ecfdf5;color:#065f46;border-radius:8px;padding:8px 12px;margin-top:10px;font-size:12.5px"></div>
       <div class="section-title">GL classification</div>
@@ -1877,13 +1879,13 @@ async function renderSettings(main) {
     api('/settings/departments'), api('/settings/approval-rules'), api('/users'), api('/settings/outbox'),
   ]);
   // tax masters exist only when the tax module is licensed
-  const [gstins, sections, rcmCats, apCodes, subLocs, costCentres, fieldLabels] = has('tax')
+  const [gstins, sections, rcmCats, apCodes, subLocs, costCentres, fieldLabels, glLock] = has('tax')
     ? await Promise.all([
         api('/settings/gstins'), api('/settings/tds-sections'), api('/settings/rcm-categories'),
         api('/settings/ap-account-codes'), api('/settings/sub-locations'), api('/settings/cost-centres'),
-        api('/settings/custom-field-labels'),
+        api('/settings/custom-field-labels'), api('/settings/gl-lock'),
       ])
-    : [[], [], [], [], [], [], {}];
+    : [[], [], [], [], [], [], {}, {}];
   const userOpts = (sel) => users.filter((u) => u.active).map((u) => `<option value="${u.id}" ${sel === u.id ? 'selected' : ''}>${esc(u.full_name)}</option>`).join('');
   const codeOpts = (list, sel) => `<option value="">— none —</option>${list.map((c) => `<option value="${esc(c.code)}" ${sel === c.code ? 'selected' : ''}>${esc(c.code)} — ${esc(c.name)}</option>`).join('')}`;
   const ruleApprover = (r) => r.approver_kind === 'department_head' ? 'Department head'
@@ -2065,6 +2067,18 @@ async function renderSettings(main) {
       </div>
     </div>
     <div class="card card-pad">
+      <h4 style="margin-bottom:4px">GL period lock (month-end close)</h4>
+      <p style="color:var(--text-muted);font-size:12.5px;margin-bottom:10px">
+        Every month up to and including the locked month is <strong>closed</strong>: no journal entry — invoice
+        booking, payment, or tax deposit — can post into it. Clear the field to reopen. Finance or admin only.</p>
+      <form id="gl-lock-form" style="display:flex;gap:10px;align-items:center">
+        <input name="locked_through" type="month" value="${esc(glLock.locked_through || '')}" style="max-width:180px">
+        <button type="submit" class="btn btn-primary">Save lock</button>
+        <span style="color:var(--text-muted);font-size:12.5px">${glLock.locked_through ? `Books currently closed through ${esc(glLock.locked_through)}` : 'No period is locked'}</span>
+      </form>
+    </div>
+
+    <div class="card card-pad" style="margin-top:14px">
       <h4 style="margin-bottom:4px">Custom field labels</h4>
       <p style="color:var(--text-muted);font-size:12.5px;margin-bottom:10px">
         Rename the 5 spare invoice fields (captured at final approval) for this client's own reporting needs
@@ -2270,6 +2284,15 @@ async function renderSettings(main) {
     try {
       await api('/settings/custom-field-labels', { method: 'PUT', body: Object.fromEntries(new FormData(e.target).entries()) });
       TAXMETA = null; toast('Labels saved', 'success');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  $('#gl-lock-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api('/settings/gl-lock', { method: 'PUT', body: Object.fromEntries(new FormData(e.target).entries()) });
+      toast(r.locked_through ? `Books closed through ${r.locked_through}` : 'GL period lock removed', 'success');
+      route();
     } catch (err) { toast(err.message, 'error'); }
   });
 }

@@ -851,6 +851,27 @@ registerCodeMaster('ap_account_codes', 'ap-account-codes');
 registerCodeMaster('sub_locations', 'sub-locations');
 registerCodeMaster('cost_centres', 'cost-centres');
 
+// ---------- GL period lock (month-end close) ----------
+// Everything up to and including the locked month is closed: no JE — invoice
+// booking, payment, or deposit — may post into it (enforced in journal.js).
+app.get('/api/settings/gl-lock', requireAuth, wrap(async (req, res) => {
+  const row = await db.prepare(`SELECT value FROM app_settings WHERE key = 'gl_locked_through'`).get();
+  res.json({ locked_through: (row && row.value) || null });
+}));
+
+app.put('/api/settings/gl-lock', requireAuth, requireRole('finance'), wrap(async (req, res) => {
+  const value = (req.body.locked_through || '').trim();
+  if (value && !/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) throw new Error('Locked-through period must be a valid month in YYYY-MM format');
+  if (value) {
+    await db.prepare(`INSERT INTO app_settings (key, value) VALUES ('gl_locked_through', ?)
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value RETURNING key`).run(value);
+  } else {
+    await db.prepare(`DELETE FROM app_settings WHERE key = 'gl_locked_through'`).run();
+  }
+  audit(req.user.id, 'update', 'gl_period_lock', null, value ? `books closed through ${value}` : 'lock removed');
+  res.json({ ok: true, locked_through: value || null });
+}));
+
 // ---------- custom field labels (per-client rename of the 5 spare invoice fields) ----------
 app.get('/api/settings/custom-field-labels', requireAuth, wrap(async (req, res) => {
   const rows = await db.prepare(`SELECT key, value FROM app_settings WHERE key LIKE 'custom_field_%_label'`).all();
@@ -1367,6 +1388,21 @@ async function prepareInvoiceGlFields(vendor, body) {
   return { placeOfSupplyCode, placeOfSupplyState, hsnSacCode, glDescription };
 }
 
+// Standard AP control: the same vendor invoice must never be recorded twice.
+// Comparison ignores case and internal whitespace ("INV 001" == "inv001").
+// Rejected/cancelled invoices don't block — a fixed resubmission is fine.
+// Call inside the insert transaction, after nextNumber() (whose advisory lock
+// serializes concurrent submissions), so two copies can't slip in together.
+async function assertNotDuplicateInvoice(vendorId, vendorInvoiceRef) {
+  const ref = (vendorInvoiceRef || '').trim();
+  if (!ref) return; // internal entries without a vendor reference are exempt
+  const dup = await db.prepare(`SELECT invoice_number FROM invoices
+    WHERE vendor_id = ? AND status NOT IN ('rejected', 'cancelled')
+      AND UPPER(REPLACE(COALESCE(vendor_invoice_ref, ''), ' ', '')) = UPPER(REPLACE(?, ' ', ''))`)
+    .get(vendorId, ref);
+  if (dup) throw new Error(`Duplicate invoice: this vendor's reference "${ref}" is already recorded on ${dup.invoice_number}`);
+}
+
 // any staff member may enter an invoice on behalf of a vendor (telco, utilities…);
 // it then routes through the approval matrix, ending with finance. Supports an
 // optional multipart attachment like the vendor portal.
@@ -1399,6 +1435,7 @@ app.post('/api/invoices', requireAuth, async (req, res) => {
       // concurrent submissions can't grab the same invoice number
       const { id, invNumber } = await db.tx(async () => {
         const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
+        await assertNotDuplicateInvoice(po.vendor_id, b.vendor_invoice_ref);
         const invId = (await db.prepare(`INSERT INTO invoices
           (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
            place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,
@@ -1467,7 +1504,7 @@ app.post('/api/invoices/:id/approve', requireAuth, wrap(async (req, res) => {
   // A lower/nil-deduction certificate valid on the invoice date can supply the rate
   // instead of the section's standard master rate (finance can still override).
   let tdsSection = (b.tds_section || '').trim();
-  let tdsRate = 0, tdsAmount = 0, tdsCertificateId = null;
+  let tdsRate = 0, tdsAmount = 0, tdsCertificateId = null, tdsRateOverrideReason = null;
   if (tdsSection && tdsSection.toLowerCase() !== 'none') {
     tdsRate = Number(b.tds_rate);
     if (!(tdsRate >= 0 && tdsRate <= 40)) throw new Error('TDS rate must be between 0 and 40%');
@@ -1491,6 +1528,7 @@ app.post('/api/invoices/:id/approve', requireAuth, wrap(async (req, res) => {
   const costCentre = (b.cost_centre || '').trim() || (dept && dept.default_cost_centre) || null;
   const programProductCode = (b.program_product_code || '').trim() || null;
   const glPeriod = (b.gl_period || '').trim() || inv.invoice_date.slice(0, 7);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(glPeriod)) throw new Error('GL period must be a valid month in YYYY-MM format');
   const customFields = [1, 2, 3, 4, 5].map((i) => (b[`custom_field_${i}`] || '').trim() || null);
 
   const result = await db.tx(async () => {
@@ -1516,7 +1554,23 @@ app.post('/api/invoices/:id/approve', requireAuth, wrap(async (req, res) => {
           throw new Error(`This certificate's threshold of ₹${cert.threshold_amount} would be exceeded (₹${utilized} already used + ₹${inv.subtotal} on this invoice) — use the standard TDS rate instead`);
         }
       }
+      // claiming a certificate means deducting at exactly its authorised rate
+      if (Math.abs(Number(cert.rate) - tdsRate) > 1e-9) {
+        throw new Error(`Certificate ${cert.certificate_number} authorises exactly ${cert.rate}% — either use that rate or approve without the certificate`);
+      }
       tdsCertificateId = cert.id;
+    } else if (tdsSection) {
+      // No certificate: the rate must come from the section master. Finance
+      // may still deviate, but only with an explicit reason that lands in
+      // the audit trail — a mistyped rate should never pass silently.
+      const masterRates = (await db.prepare('SELECT rate FROM tds_sections WHERE section = ? AND active = 1').all(tdsSection))
+        .map((r) => Number(r.rate));
+      if (!masterRates.some((r) => Math.abs(r - tdsRate) < 1e-9)) {
+        tdsRateOverrideReason = (b.tds_rate_override_reason || '').trim();
+        if (!tdsRateOverrideReason) {
+          throw new Error(`TDS rate ${tdsRate}% does not match the ${tdsSection} master rate${masterRates.length === 1 ? '' : 's'} (${masterRates.join('%, ')}%) — provide an override reason to use it anyway`);
+        }
+      }
     }
     await approvals.act('invoice', inv.id, req.user, true, b.comment, inv.department_id);
     await db.prepare(`UPDATE invoices SET status='approved', approved_by=?, tds_section=?, tds_rate=?, tds_amount=?, tds_certificate_id=?,
@@ -1530,7 +1584,8 @@ app.post('/api/invoices/:id/approve', requireAuth, wrap(async (req, res) => {
     await db.prepare('UPDATE invoices SET booking_je_id = ? WHERE id = ?').run(jeId, inv.id);
     return { jeNumber, tdsAmount, netPayable: r2(updated.total - tdsAmount) };
   });
-  audit(req.user.id, 'approve', 'invoice', inv.id, `${inv.invoice_number} (JE ${result.jeNumber})`);
+  audit(req.user.id, 'approve', 'invoice', inv.id,
+    `${inv.invoice_number} (JE ${result.jeNumber})${tdsRateOverrideReason ? ` — TDS rate override to ${tdsRate}%: ${tdsRateOverrideReason}` : ''}`);
   const approvedRecipients = inv.source === 'vendor' ? vendorEmails(inv.vendor_id) : [userEmail(inv.created_by)];
   sendMail(approvedRecipients,
     `Invoice ${inv.invoice_number} approved — net payable ${fmtInr(result.netPayable)}`,
@@ -2234,6 +2289,7 @@ app.post('/api/vendor/invoices', requireVendorAuth, async (req, res) => {
       // invoice (no approval chain) can never be left behind
       const { id, invNumber } = await db.tx(async () => {
         const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
+        await assertNotDuplicateInvoice(po.vendor_id, b.vendor_invoice_ref);
         const id = (await db.prepare(`INSERT INTO invoices
           (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
            place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,

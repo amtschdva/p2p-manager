@@ -57,6 +57,14 @@ async function postJE({ type, refType, refId, jeDate, narration, userId, lines, 
   if (Math.abs(dr - cr) > 0.01) {
     throw new Error(`Journal does not balance (Dr ${dr} vs Cr ${cr}) — refusing to post`);
   }
+  // Period control: once finance closes a month (Settings → GL period lock),
+  // nothing may post into it or any earlier month — the books reported for a
+  // closed period must never change underneath finance.
+  const period = glPeriod || String(jeDate || '').slice(0, 7);
+  const lock = await db.prepare(`SELECT value FROM app_settings WHERE key = 'gl_locked_through'`).get();
+  if (lock && lock.value && period && period <= lock.value) {
+    throw new Error(`GL period ${period} is closed (books locked through ${lock.value}) — use a later period or ask finance to reopen it`);
+  }
   const meta = glMeta || {};
   return db.tx(async () => {
     const jeNumber = await nextNumber('JE', 'journal_entries', 'je_number');
