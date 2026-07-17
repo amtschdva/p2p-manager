@@ -8,13 +8,17 @@ const { db, audit, nextNumber } = require('../db');
 const modules = require('../modules');
 const { postPaymentJE, r2 } = require('../journal');
 const { JWT_SECRET, requireAuth, requireRole, wrap, fmtInr, bearerToken, financeHead } = require('../context');
-const { INV_LIST_SQL, PAY_LIST_SQL } = require('../lib/queries');
+const { INV_LIST_SQL, PAY_LIST_SQL, visibleDeptIds, canSeeDoc } = require('../lib/queries');
 const { sendMail, usersByRole, userEmail, vendorEmails } = require('../mailer');
 
 module.exports = function register(app) {
-  app.get('/api/payments', requireAuth, async (req, res) => {
-    res.json(await db.prepare(`${PAY_LIST_SQL} ORDER BY p.id DESC`).all());
-  });
+  app.get('/api/payments', requireAuth, wrap(async (req, res) => {
+    // payments inherit the visibility of the invoice they settle — a payment
+    // row reveals invoice amounts and vendor bank details
+    const deptIds = await visibleDeptIds(req.user);
+    const payments = await db.prepare(`${PAY_LIST_SQL} ORDER BY p.id DESC`).all();
+    res.json(deptIds === null ? payments : payments.filter((p) => canSeeDoc(deptIds, p, req.user.id, 'created_by')));
+  }));
 
   app.post('/api/payments', requireAuth, requireRole('finance'), wrap(async (req, res) => {
     const { invoice_id, amount, payment_date, method, reference, notes } = req.body;

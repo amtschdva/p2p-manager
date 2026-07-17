@@ -118,7 +118,13 @@ freshly seeded database, `deepak@nimbuscloud.in / nimbus123` (pending verificati
   admin see every department's documents** — finance processes all of them,
   procurement converts any department's PRs into POs. The dashboard's Recent
   Activity works the same way: finance/admin see the full stream, everyone
-  else sees only their own actions.
+  else sees only their own actions. The scoping extends to invoice
+  **attachment downloads** and the **payments list** (a payment inherits the
+  visibility of the invoice it settles), with one principled exception:
+  whoever the matrix assigned to the current pending step can always open
+  the document they're being asked to approve. POs and GRNs stay unscoped —
+  receiving and GRN approval are role-based functions that work across
+  departments.
 - **Stale-approval reminders**: anything pending longer than
   `REMIND_AFTER_DAYS` (default 3) re-notifies the current approvers, repeated
   at most every N days.

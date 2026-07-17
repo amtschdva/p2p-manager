@@ -24,8 +24,15 @@ module.exports = function register(app) {
   app.get('/api/prs/:id', requireAuth, wrap(async (req, res) => {
     const pr = await db.prepare(`${PR_LIST_SQL} WHERE p.id = ?`).get(req.params.id);
     if (!pr) return res.status(404).json({ error: 'PR not found' });
+    // dept scoping, with the same exception as invoices: whoever the matrix
+    // assigned to the current pending step may always open the document
     const deptIds = await visibleDeptIds(req.user);
-    if (!canSeeDoc(deptIds, pr, req.user.id, 'requester_id')) {
+    let mayView = canSeeDoc(deptIds, pr, req.user.id, 'requester_id');
+    if (!mayView && pr.status === 'submitted') {
+      const pendingStep = await approvals.currentStep('pr', pr.id);
+      mayView = !!pendingStep && await approvals.canAct(req.user, pendingStep, pr.department_id);
+    }
+    if (!mayView) {
       return res.status(403).json({ error: "This requisition belongs to another department — only its department head/deputy and finance can view it" });
     }
     pr.items = await db.prepare('SELECT * FROM pr_items WHERE pr_id = ?').all(pr.id);

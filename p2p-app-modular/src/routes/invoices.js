@@ -12,6 +12,20 @@ const { JWT_SECRET, requireAuth, wrap, fmtInr, upload, UPLOAD_DIR, verifyFileSig
 const { INV_LIST_SQL, computeMatch, prepareInvoiceTax, prepareReceiptAndDueDate, prepareInvoiceGlFields, visibleDeptIds, canSeeDoc, assertNotDuplicateInvoice } = require('../lib/queries');
 const { sendMail, userEmail, stepEmails, vendorEmails } = require('../mailer');
 
+// Department scoping plus one principled exception: whoever the matrix has
+// assigned to the CURRENT pending step may always view the document —
+// otherwise a role-routed approver from another department could be asked
+// to approve something they cannot open.
+async function canViewInvoice(user, inv) {
+  const deptIds = await visibleDeptIds(user);
+  if (canSeeDoc(deptIds, inv, user.id, 'created_by')) return true;
+  if (inv.status === 'pending') {
+    const step = await approvals.currentStep('invoice', inv.id);
+    if (step && await approvals.canAct(user, step, inv.department_id, inv.created_by)) return true;
+  }
+  return false;
+}
+
 module.exports = function register(app) {
   app.get('/api/invoices', requireAuth, wrap(async (req, res) => {
     const deptIds = await visibleDeptIds(req.user);
@@ -22,8 +36,7 @@ module.exports = function register(app) {
   app.get('/api/invoices/:id', requireAuth, wrap(async (req, res) => {
     const inv = await db.prepare(`${INV_LIST_SQL} WHERE i.id = ?`).get(req.params.id);
     if (!inv) return res.status(404).json({ error: 'Invoice not found' });
-    const deptIds = await visibleDeptIds(req.user);
-    if (!canSeeDoc(deptIds, inv, req.user.id, 'created_by')) {
+    if (!await canViewInvoice(req.user, inv)) {
       return res.status(403).json({ error: "This invoice belongs to another department — only its department head/deputy and finance can view it" });
     }
     inv.payments = await db.prepare('SELECT p.*, u.full_name AS created_by_name FROM payments p JOIN users u ON u.id = p.created_by WHERE p.invoice_id = ?').all(inv.id);
@@ -282,6 +295,14 @@ async function attachmentHandler(req, res) {
   if (payload.kind === 'vendor') {
     const vu = await db.prepare('SELECT * FROM vendor_users WHERE id = ?').get(payload.sub);
     if (!vu || vu.vendor_id !== inv.vendor_id) return res.status(403).json({ error: 'Not your invoice' });
+  } else {
+    // staff: same department-visibility rule as the invoice detail page —
+    // the attachment must not leak what the page itself refuses to show
+    const user = await db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(payload.sub);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    if (!await canViewInvoice(user, inv)) {
+      return res.status(403).json({ error: "This invoice belongs to another department — only its department head/deputy and finance can view it" });
+    }
   }
   const file = path.join(UPLOAD_DIR, path.basename(inv.attachment_path));
   if (!fs.existsSync(file)) return res.status(404).json({ error: 'File missing on server' });

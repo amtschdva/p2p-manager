@@ -941,8 +941,15 @@ app.get('/api/prs', requireAuth, wrap(async (req, res) => {
 app.get('/api/prs/:id', requireAuth, wrap(async (req, res) => {
   const pr = await db.prepare(`${PR_LIST_SQL} WHERE p.id = ?`).get(req.params.id);
   if (!pr) return res.status(404).json({ error: 'PR not found' });
+  // dept scoping, with the same exception as invoices: whoever the matrix
+  // assigned to the current pending step may always open the document
   const prDeptIds = await visibleDeptIds(req.user);
-  if (!canSeeDoc(prDeptIds, pr, req.user.id, 'requester_id')) {
+  let mayViewPr = canSeeDoc(prDeptIds, pr, req.user.id, 'requester_id');
+  if (!mayViewPr && pr.status === 'submitted') {
+    const pendingStep = await approvals.currentStep('pr', pr.id);
+    mayViewPr = !!pendingStep && await approvals.canAct(req.user, pendingStep, pr.department_id);
+  }
+  if (!mayViewPr) {
     return res.status(403).json({ error: "This requisition belongs to another department — only its department head/deputy and finance can view it" });
   }
   pr.items = await db.prepare('SELECT * FROM pr_items WHERE pr_id = ?').all(pr.id);
@@ -1250,11 +1257,24 @@ app.get('/api/invoices', requireAuth, wrap(async (req, res) => {
   res.json(deptIds === null ? invoices : invoices.filter((i) => canSeeDoc(deptIds, i, req.user.id, 'created_by')));
 }));
 
+// Department scoping plus one principled exception: whoever the matrix has
+// assigned to the CURRENT pending step may always view the document —
+// otherwise a role-routed approver from another department could be asked
+// to approve something they cannot open.
+async function canViewInvoice(user, inv) {
+  const deptIds = await visibleDeptIds(user);
+  if (canSeeDoc(deptIds, inv, user.id, 'created_by')) return true;
+  if (inv.status === 'pending') {
+    const step = await approvals.currentStep('invoice', inv.id);
+    if (step && await approvals.canAct(user, step, inv.department_id, inv.created_by)) return true;
+  }
+  return false;
+}
+
 app.get('/api/invoices/:id', requireAuth, wrap(async (req, res) => {
   const inv = await db.prepare(`${INV_LIST_SQL} WHERE i.id = ?`).get(req.params.id);
   if (!inv) return res.status(404).json({ error: 'Invoice not found' });
-  const invDeptIds = await visibleDeptIds(req.user);
-  if (!canSeeDoc(invDeptIds, inv, req.user.id, 'created_by')) {
+  if (!await canViewInvoice(req.user, inv)) {
     return res.status(403).json({ error: "This invoice belongs to another department — only its department head/deputy and finance can view it" });
   }
   inv.payments = await db.prepare('SELECT p.*, u.full_name AS created_by_name FROM payments p JOIN users u ON u.id = p.created_by WHERE p.invoice_id = ?').all(inv.id);
@@ -1287,6 +1307,14 @@ app.get('/api/invoices/:id/attachment', wrap(async (req, res) => {
   if (payload.kind === 'vendor') {
     const vu = await db.prepare('SELECT * FROM vendor_users WHERE id = ?').get(payload.sub);
     if (!vu || vu.vendor_id !== inv.vendor_id) return res.status(403).json({ error: 'Not your invoice' });
+  } else {
+    // staff: same department-visibility rule as the invoice detail page —
+    // the attachment must not leak what the page itself refuses to show
+    const user = await db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(payload.sub);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    if (!await canViewInvoice(user, inv)) {
+      return res.status(403).json({ error: "This invoice belongs to another department — only its department head/deputy and finance can view it" });
+    }
   }
   const file = path.join(UPLOAD_DIR, path.basename(inv.attachment_path));
   if (!fs.existsSync(file)) return res.status(404).json({ error: 'File missing on server' });
@@ -1623,7 +1651,7 @@ const financeHead = () => db.prepare(
   `SELECT head_user_id FROM departments WHERE lower(name) = 'finance' AND active = 1 AND head_user_id IS NOT NULL`).get();
 
 const PAY_LIST_SQL = `
-  SELECT p.*, i.invoice_number, i.total AS invoice_total, i.tds_amount, v.name AS vendor_name,
+  SELECT p.*, i.invoice_number, i.total AS invoice_total, i.tds_amount, i.department_id, v.name AS vendor_name,
     v.bank_name, v.bank_account, v.ifsc,
     u.full_name AS created_by_name, ru.full_name AS released_by_name
   FROM payments p
@@ -1632,9 +1660,13 @@ const PAY_LIST_SQL = `
   JOIN users u ON u.id = p.created_by
   LEFT JOIN users ru ON ru.id = p.released_by`;
 
-app.get('/api/payments', requireAuth, async (req, res) => {
-  res.json(await db.prepare(`${PAY_LIST_SQL} ORDER BY p.id DESC`).all());
-});
+app.get('/api/payments', requireAuth, wrap(async (req, res) => {
+  // payments inherit the visibility of the invoice they settle — a payment
+  // row reveals invoice amounts and vendor bank details
+  const deptIds = await visibleDeptIds(req.user);
+  const payments = await db.prepare(`${PAY_LIST_SQL} ORDER BY p.id DESC`).all();
+  res.json(deptIds === null ? payments : payments.filter((p) => canSeeDoc(deptIds, p, req.user.id, 'created_by')));
+}));
 
 app.post('/api/payments', requireAuth, requireRole('finance'), wrap(async (req, res) => {
   const { invoice_id, amount, payment_date, method, reference, notes } = req.body;

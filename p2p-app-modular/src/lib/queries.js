@@ -47,7 +47,7 @@ const INV_LIST_SQL = `
   LEFT JOIN users a ON a.id = i.approved_by`;
 
 const PAY_LIST_SQL = `
-  SELECT p.*, i.invoice_number, i.total AS invoice_total, i.tds_amount, v.name AS vendor_name,
+  SELECT p.*, i.invoice_number, i.total AS invoice_total, i.tds_amount, i.department_id, v.name AS vendor_name,
     v.bank_name, v.bank_account, v.ifsc,
     u.full_name AS created_by_name, ru.full_name AS released_by_name
   FROM payments p

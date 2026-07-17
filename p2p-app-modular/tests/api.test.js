@@ -660,6 +660,7 @@ test('visibility: dept heads/deputies see only their departments; finance sees a
   const rahul = await login('rahul', 'rahul123');   // finance
   const vikram = await login('vikram', 'vikram123'); // requester — IT
   const priya = await login('priya', 'priya123');   // procurement (central function)
+  const sneha = await login('sneha', 'sneha123');   // finance clerk
 
   // invoiceId was entered by sneha (Finance department): meera must not see it
   const meeraList = await call('GET', '/api/invoices', { token: meera });
@@ -694,6 +695,32 @@ test('visibility: dept heads/deputies see only their departments; finance sees a
   const rahulDash = await call('GET', '/api/dashboard', { token: rahul });
   assert.ok(rahulDash.json.recentActivity.some((a) => a.user_id !== meRahul.json.id),
     'finance activity feed includes other users');
+
+  // attachment downloads follow the same scoping — the file must not leak
+  // what the invoice page itself refuses to show
+  const attPo = await call('POST', '/api/pos', {
+    token: priya, body: { vendor_id: vendorId, company_gstin_id: 1, items: [{ description: 'Svc', quantity: 1, unit: 'EA', unit_price: 900 }] },
+  });
+  const attForm = new FormData();
+  attForm.append('po_id', String(attPo.json.id));
+  attForm.append('invoice_date', '2026-07-12');
+  attForm.append('subtotal', '900');
+  attForm.append('cgst_amount', '0');
+  attForm.append('sgst_amount', '0');
+  attForm.append('attachment', pdfBlob(), 'inv.pdf');
+  const attInv = await call('POST', '/api/invoices', { token: sneha, form: attForm });
+  assert.equal(attInv.status, 201, attInv.text);
+  const meeraAtt = await call('GET', `/api/invoices/${attInv.json.id}/attachment?token=${encodeURIComponent(meera)}`);
+  assert.equal(meeraAtt.status, 403, 'other-department attachment must be refused');
+  const rahulAtt = await call('GET', `/api/invoices/${attInv.json.id}/attachment?token=${encodeURIComponent(rahul)}`);
+  assert.equal(rahulAtt.status, 200, rahulAtt.text);
+
+  // the payments list inherits invoice visibility: every payment so far settles
+  // a Finance-department or department-less invoice, so vikram (IT) sees none
+  const vikramPays = await call('GET', '/api/payments', { token: vikram });
+  assert.equal(vikramPays.json.length, 0, 'IT requester sees no other-department payments');
+  const rahulPays = await call('GET', '/api/payments', { token: rahul });
+  assert.ok(rahulPays.json.length > 0, 'finance sees all payments');
 });
 
 test('concurrency: parallel submissions get unique numbers; a final approval can only book once', async () => {
