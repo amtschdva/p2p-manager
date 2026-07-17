@@ -696,6 +696,45 @@ test('visibility: dept heads/deputies see only their departments; finance sees a
     'finance activity feed includes other users');
 });
 
+test('concurrency: parallel submissions get unique numbers; a final approval can only book once', async () => {
+  const vikram = await login('vikram', 'vikram123');
+  const priya = await login('priya', 'priya123');
+  const rahul = await login('rahul', 'rahul123');
+  const sneha = await login('sneha', 'sneha123');
+
+  // five PRs raised at the same instant must all succeed with distinct numbers
+  const results = await Promise.all([1, 2, 3, 4, 5].map((i) => call('POST', '/api/prs', {
+    token: vikram,
+    body: { justification: `parallel PR ${i}`, items: [{ description: 'Widget', quantity: 1, unit: 'EA', est_unit_price: 100 }] },
+  })));
+  for (const r of results) assert.equal(r.status, 201, r.text);
+  const numbers = results.map((r) => r.json.pr_number);
+  assert.equal(new Set(numbers).size, 5, `PR numbers must be unique, got: ${numbers.join(', ')}`);
+
+  // two simultaneous final approvals of one invoice must book it exactly once
+  const po = await call('POST', '/api/pos', {
+    token: priya, body: { vendor_id: vendorId, company_gstin_id: 1, items: [{ description: 'Service', quantity: 1, unit: 'EA', unit_price: 1000 }] },
+  });
+  const inv = await call('POST', '/api/invoices', {
+    token: sneha, body: { po_id: po.json.id, invoice_date: '2026-07-01', subtotal: 1000, cgst_amount: 0, sgst_amount: 0 },
+  });
+  assert.equal(inv.status, 201, inv.text);
+  const l1 = await call('POST', `/api/invoices/${inv.json.id}/approve`, { token: rahul, body: {} });
+  assert.equal(l1.json.finished, false);
+  const [a, b2] = await Promise.all([
+    call('POST', `/api/invoices/${inv.json.id}/approve`, { token: rahul, body: {} }),
+    call('POST', `/api/invoices/${inv.json.id}/approve`, { token: rahul, body: {} }),
+  ]);
+  const statuses = [a.status, b2.status].sort();
+  assert.deepEqual(statuses, [200, 400], `expected exactly one success, got ${a.status}/${b2.status}`);
+  const loser = a.status === 400 ? a : b2;
+  assert.match(loser.json.error, /already processed|Cannot approve/i);
+  // and exactly one booking JE exists for this invoice
+  const journal = await call('GET', '/api/journal', { token: rahul });
+  const bookings = journal.json.filter((j) => j.ref_type === 'invoice' && j.ref_id === inv.json.id);
+  assert.equal(bookings.length, 1, 'exactly one booking JE');
+});
+
 test('module gating: a core-only server hides tax, payments and vendor portal', async () => {
   // second instance against the same test DB, with every optional module off
   const gatePort = Number(PORT) + 1;

@@ -286,8 +286,8 @@ module.exports = function register(app) {
     const amount = r2(Number(b.amount));
     if (!(amount > 0)) throw new Error('Amount must be greater than zero');
     if (!b.deposit_date) throw new Error('Deposit date is required');
-    const depNumber = await nextNumber('DEP', 'tds_deposits', 'deposit_number');
-    const id = await db.tx(async () => {
+    const { id, depNumber } = await db.tx(async () => {
+      const depNumber = await nextNumber('DEP', 'tds_deposits', 'deposit_number');
       const depId = (await db.prepare(`INSERT INTO tds_deposits (deposit_number, kind, period, section, amount, challan_no, bsr_code, deposit_date, notes, created_by)
         VALUES (?,?,?,?,?,?,?,?,?,?)`)
         .run(depNumber, kind, b.period, kind === 'tds' ? b.section : null, amount,
@@ -295,7 +295,7 @@ module.exports = function register(app) {
       const dep = await db.prepare('SELECT * FROM tds_deposits WHERE id = ?').get(depId);
       const { jeId } = await postDepositJE(dep, req.user.id);
       await db.prepare('UPDATE tds_deposits SET je_id = ? WHERE id = ?').run(jeId, depId);
-      return depId;
+      return { id: depId, depNumber };
     });
     audit(req.user.id, 'create', 'tax_deposit', id, depNumber);
     res.status(201).json({ id, deposit_number: depNumber });

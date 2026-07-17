@@ -176,23 +176,29 @@ module.exports = function register(app) {
         const gl = await prepareInvoiceGlFields(vendor, b);
 
         const match = await computeMatch(po.id, t.sub);
-        const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
-        const id = (await db.prepare(`INSERT INTO invoices
-          (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
-           place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,
-           subtotal, cgst_amount, sgst_amount, igst_amount, tax_amount, total,
-           rcm, rcm_category_id, currency, gstr2b_status,
-           status, match_status, match_notes, source, vendor_user_id, attachment_path, attachment_name)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,'vendor',?,?,?)`)
-          .run(invNumber, b.vendor_invoice_ref || null, po.id, po.vendor_id, po.company_gstin_id, b.invoice_date, receivedDate, dueDate,
-               gl.placeOfSupplyCode, gl.placeOfSupplyState, gl.hsnSacCode, gl.glDescription,
-               t.sub, t.cgst, t.sgst, t.igst, t.tax, t.total,
-               t.rcm, t.rcmCategoryId, vendor.currency || 'INR', t.gstr2bStatus,
-               match.status, match.notes, req.vendorUser.id,
-               req.file ? req.file.filename : null, req.file ? req.file.originalname : null)).lastInsertRowid;
-        const invDeptId = ((await db.prepare('SELECT department_id FROM users WHERE id = ?').get(po.created_by)) || {}).department_id || null;
-        if (invDeptId) await db.prepare('UPDATE invoices SET department_id = ? WHERE id = ?').run(invDeptId, id);
-        await approvals.createApprovals('invoice', id, invDeptId, t.total);
+        // one transaction for number + insert + approval chain: concurrent
+        // submissions can't collide on the invoice number, and a half-created
+        // invoice (no approval chain) can never be left behind
+        const { id, invNumber } = await db.tx(async () => {
+          const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
+          const id = (await db.prepare(`INSERT INTO invoices
+            (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
+             place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,
+             subtotal, cgst_amount, sgst_amount, igst_amount, tax_amount, total,
+             rcm, rcm_category_id, currency, gstr2b_status,
+             status, match_status, match_notes, source, vendor_user_id, attachment_path, attachment_name)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,'vendor',?,?,?)`)
+            .run(invNumber, b.vendor_invoice_ref || null, po.id, po.vendor_id, po.company_gstin_id, b.invoice_date, receivedDate, dueDate,
+                 gl.placeOfSupplyCode, gl.placeOfSupplyState, gl.hsnSacCode, gl.glDescription,
+                 t.sub, t.cgst, t.sgst, t.igst, t.tax, t.total,
+                 t.rcm, t.rcmCategoryId, vendor.currency || 'INR', t.gstr2bStatus,
+                 match.status, match.notes, req.vendorUser.id,
+                 req.file ? req.file.filename : null, req.file ? req.file.originalname : null)).lastInsertRowid;
+          const invDeptId = ((await db.prepare('SELECT department_id FROM users WHERE id = ?').get(po.created_by)) || {}).department_id || null;
+          if (invDeptId) await db.prepare('UPDATE invoices SET department_id = ? WHERE id = ?').run(invDeptId, id);
+          await approvals.createApprovals('invoice', id, invDeptId, t.total);
+          return { id, invNumber };
+        });
         audit(null, 'portal_submit', 'invoice', id, `${invNumber} by ${req.vendorUser.vendor_name}`);
         res.status(201).json({ id, invoice_number: invNumber, match_status: match.status });
       } catch (e) {

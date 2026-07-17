@@ -941,14 +941,14 @@ app.post('/api/prs', requireAuth, wrap(async (req, res) => {
   const deptId = Number(department_id) || req.user.department_id || null;
   const dept = deptId ? await db.prepare('SELECT * FROM departments WHERE id = ?').get(deptId) : null;
   const estimate = items.reduce((s, it) => s + Number(it.quantity) * (Number(it.est_unit_price) || 0), 0);
-  const prNumber = await nextNumber('PR', 'prs', 'pr_number');
-  const id = await db.tx(async () => {
+  const { id, prNumber } = await db.tx(async () => {
+    const prNumber = await nextNumber('PR', 'prs', 'pr_number');
     const prId = (await db.prepare('INSERT INTO prs (pr_number, requester_id, department, department_id, needed_by, justification) VALUES (?,?,?,?,?,?)')
       .run(prNumber, req.user.id, dept ? dept.name : null, deptId, needed_by || null, justification || null)).lastInsertRowid;
     const ins = db.prepare('INSERT INTO pr_items (pr_id, description, quantity, unit, est_unit_price) VALUES (?,?,?,?,?)');
     for (const it of items) await ins.run(prId, it.description, Number(it.quantity), it.unit || 'EA', Number(it.est_unit_price) || 0);
     await approvals.createApprovals('pr', prId, deptId, estimate);
-    return prId;
+    return { id: prId, prNumber };
   });
   audit(req.user.id, 'create', 'pr', id, prNumber);
   const step = await approvals.currentStep('pr', id);
@@ -1055,14 +1055,14 @@ app.post('/api/pos', requireAuth, requireRole('procurement'), wrap(async (req, r
     if (!pr) throw new Error('Linked PR not found');
     if (pr.status !== 'approved') throw new Error('PO can only be created from an approved PR');
   }
-  const poNumber = await nextNumber('PO', 'pos', 'po_number');
-  const id = await db.tx(async () => {
+  const { id, poNumber } = await db.tx(async () => {
+    const poNumber = await nextNumber('PO', 'pos', 'po_number');
     const poId = (await db.prepare('INSERT INTO pos (po_number, pr_id, vendor_id, company_gstin_id, created_by, expected_date, notes) VALUES (?,?,?,?,?,?,?)')
       .run(poNumber, pr_id || null, vendor_id, gstin.id, req.user.id, expected_date || null, notes || null)).lastInsertRowid;
     const ins = db.prepare('INSERT INTO po_items (po_id, description, quantity, unit, unit_price) VALUES (?,?,?,?,?)');
     for (const it of items) await ins.run(poId, it.description, Number(it.quantity), it.unit || 'EA', Number(it.unit_price) || 0);
     if (pr_id) await db.prepare(`UPDATE prs SET status='converted' WHERE id=?`).run(pr_id);
-    return poId;
+    return { id: poId, poNumber };
   });
   audit(req.user.id, 'create', 'po', id, poNumber);
   res.status(201).json({ id, po_number: poNumber });
@@ -1134,8 +1134,8 @@ app.post('/api/grns', requireAuth, requireRole('procurement'), wrap(async (req, 
   }
   if (!anyQty) throw new Error('Enter a received quantity on at least one line');
 
-  const grnNumber = await nextNumber('GRN', 'grns', 'grn_number');
-  const id = await db.tx(async () => {
+  const { id, grnNumber } = await db.tx(async () => {
+    const grnNumber = await nextNumber('GRN', 'grns', 'grn_number');
     const grnId = (await db.prepare(`INSERT INTO grns (grn_number, po_id, received_by, received_date, notes, status) VALUES (?,?,?,?,?,'pending')`)
       .run(grnNumber, po_id, req.user.id, received_date || new Date().toISOString().slice(0, 10), notes || null)).lastInsertRowid;
     const ins = db.prepare('INSERT INTO grn_items (grn_id, po_item_id, quantity_received, condition_notes) VALUES (?,?,?,?)');
@@ -1143,7 +1143,7 @@ app.post('/api/grns', requireAuth, requireRole('procurement'), wrap(async (req, 
       const qty = Number(it.quantity_received) || 0;
       if (qty > 0) await ins.run(grnId, it.po_item_id, qty, it.condition_notes || null);
     }
-    return grnId;
+    return { id: grnId, grnNumber };
   });
   audit(req.user.id, 'create', 'grn', id, grnNumber);
   sendMail(usersByRole('approver', 'admin'),
@@ -1390,13 +1390,15 @@ app.post('/api/invoices', requireAuth, async (req, res) => {
       const gl = await prepareInvoiceGlFields(vendor, b);
 
       const match = await computeMatch(po.id, t.sub);
-      const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
       // route the approval chain via the uploader's department, falling back to
       // the PO owner's department (dept head first, then finance)
       const invDeptId = req.user.department_id
         || (await db.prepare('SELECT department_id FROM users WHERE id = ?').get(po.created_by) || {}).department_id
         || null;
-      const id = await db.tx(async () => {
+      // number allocation lives inside the same transaction as the insert so
+      // concurrent submissions can't grab the same invoice number
+      const { id, invNumber } = await db.tx(async () => {
+        const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
         const invId = (await db.prepare(`INSERT INTO invoices
           (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
            place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,
@@ -1413,7 +1415,7 @@ app.post('/api/invoices', requireAuth, async (req, res) => {
                req.file ? req.file.filename : null, req.file ? req.file.originalname : null,
                req.user.id)).lastInsertRowid;
         await approvals.createApprovals('invoice', invId, invDeptId, t.total);
-        return invId;
+        return { id: invId, invNumber };
       });
       audit(req.user.id, 'create', 'invoice', id, invNumber);
       const step = await approvals.currentStep('invoice', id);
@@ -1470,21 +1472,6 @@ app.post('/api/invoices/:id/approve', requireAuth, wrap(async (req, res) => {
     tdsRate = Number(b.tds_rate);
     if (!(tdsRate >= 0 && tdsRate <= 40)) throw new Error('TDS rate must be between 0 and 40%');
     tdsAmount = r2(inv.subtotal * tdsRate / 100);
-    if (b.tds_certificate_id) {
-      const cert = await db.prepare(`SELECT * FROM vendor_tds_certificates WHERE id = ? AND vendor_id = ? AND tds_section = ? AND active = 1
-        AND valid_from <= ? AND valid_to >= ?`).get(Number(b.tds_certificate_id), inv.vendor_id, tdsSection, inv.invoice_date, inv.invoice_date);
-      if (!cert) throw new Error('That lower-TDS certificate is not valid for this vendor/section on the invoice date');
-      // the lower rate applies only up to the certificate's threshold (its
-      // authorised limit) — whichever comes first between that and its validity window
-      if (cert.threshold_amount != null) {
-        const utilized = (await db.prepare(`SELECT COALESCE(SUM(subtotal), 0) AS s FROM invoices
-          WHERE tds_certificate_id = ? AND status NOT IN ('rejected', 'cancelled') AND id != ?`).get(cert.id, inv.id)).s;
-        if (utilized + inv.subtotal > cert.threshold_amount) {
-          throw new Error(`This certificate's threshold of ₹${cert.threshold_amount} would be exceeded (₹${utilized} already used + ₹${inv.subtotal} on this invoice) — use the standard TDS rate instead`);
-        }
-      }
-      tdsCertificateId = cert.id;
-    }
   } else {
     tdsSection = null;
   }
@@ -1507,6 +1494,30 @@ app.post('/api/invoices/:id/approve', requireAuth, wrap(async (req, res) => {
   const customFields = [1, 2, 3, 4, 5].map((i) => (b[`custom_field_${i}`] || '').trim() || null);
 
   const result = await db.tx(async () => {
+    // Lock the invoice row and re-verify it is still pending: two final
+    // approvals racing each other would otherwise both book it (double JE).
+    const locked = await db.prepare('SELECT status FROM invoices WHERE id = ? FOR UPDATE').get(inv.id);
+    if (!locked || locked.status !== 'pending') {
+      throw new Error(`Invoice was already processed (status "${locked ? locked.status : 'missing'}")`);
+    }
+    // Certificate validation + threshold check under a row lock, in the same
+    // transaction as the booking: concurrent approvals against the same
+    // certificate serialize here, so its threshold can never be overshot.
+    if (tdsSection && b.tds_certificate_id) {
+      const cert = await db.prepare(`SELECT * FROM vendor_tds_certificates WHERE id = ? AND vendor_id = ? AND tds_section = ? AND active = 1
+        AND valid_from <= ? AND valid_to >= ? FOR UPDATE`).get(Number(b.tds_certificate_id), inv.vendor_id, tdsSection, inv.invoice_date, inv.invoice_date);
+      if (!cert) throw new Error('That lower-TDS certificate is not valid for this vendor/section on the invoice date');
+      // the lower rate applies only up to the certificate's threshold (its
+      // authorised limit) — whichever comes first between that and its validity window
+      if (cert.threshold_amount != null) {
+        const utilized = (await db.prepare(`SELECT COALESCE(SUM(subtotal), 0) AS s FROM invoices
+          WHERE tds_certificate_id = ? AND status NOT IN ('rejected', 'cancelled') AND id != ?`).get(cert.id, inv.id)).s;
+        if (utilized + inv.subtotal > cert.threshold_amount) {
+          throw new Error(`This certificate's threshold of ₹${cert.threshold_amount} would be exceeded (₹${utilized} already used + ₹${inv.subtotal} on this invoice) — use the standard TDS rate instead`);
+        }
+      }
+      tdsCertificateId = cert.id;
+    }
     await approvals.act('invoice', inv.id, req.user, true, b.comment, inv.department_id);
     await db.prepare(`UPDATE invoices SET status='approved', approved_by=?, tds_section=?, tds_rate=?, tds_amount=?, tds_certificate_id=?,
                 itc_eligibility=?, igst_amount=?, tax_amount=?, sub_location=?, cost_centre=?, program_product_code=?, gl_period=?,
@@ -1579,17 +1590,24 @@ app.post('/api/payments', requireAuth, requireRole('finance'), wrap(async (req, 
   }
   const amt = Number(amount);
   if (!(amt > 0)) throw new Error('Payment amount must be greater than zero');
-  // vendor is owed total − TDS; released AND pending payments both consume the balance
-  const netPayable = r2(inv.total - inv.tds_amount);
-  const committed = (await db.prepare(`SELECT COALESCE(SUM(amount),0) s FROM payments WHERE invoice_id = ? AND status != 'cancelled'`).get(invoice_id)).s;
-  const outstanding = r2(netPayable - committed);
-  if (amt > outstanding + 0.01) throw new Error(`Amount exceeds outstanding balance of ₹${outstanding.toFixed(2)} (net of TDS, incl. payments awaiting release)`);
+  // Balance check + insert in one transaction, with the invoice row locked:
+  // two payments prepared at the same moment would otherwise both read the
+  // old committed total and together overshoot the outstanding balance.
+  const { id, payNumber } = await db.tx(async () => {
+    await db.prepare('SELECT id FROM invoices WHERE id = ? FOR UPDATE').get(invoice_id);
+    // vendor is owed total − TDS; released AND pending payments both consume the balance
+    const netPayable = r2(inv.total - inv.tds_amount);
+    const committed = (await db.prepare(`SELECT COALESCE(SUM(amount),0) s FROM payments WHERE invoice_id = ? AND status != 'cancelled'`).get(invoice_id)).s;
+    const outstanding = r2(netPayable - committed);
+    if (amt > outstanding + 0.01) throw new Error(`Amount exceeds outstanding balance of ₹${outstanding.toFixed(2)} (net of TDS, incl. payments awaiting release)`);
 
-  const payNumber = await nextNumber('PAY', 'payments', 'payment_number');
-  const id = (await db.prepare(`INSERT INTO payments (payment_number, invoice_id, amount, payment_date, method, reference, notes, status, created_by)
-    VALUES (?,?,?,?,?,?,?,'pending_release',?)`)
-    .run(payNumber, invoice_id, amt, payment_date || new Date().toISOString().slice(0, 10),
-         method || 'bank_transfer', reference || null, notes || null, req.user.id)).lastInsertRowid;
+    const payNumber = await nextNumber('PAY', 'payments', 'payment_number');
+    const id = (await db.prepare(`INSERT INTO payments (payment_number, invoice_id, amount, payment_date, method, reference, notes, status, created_by)
+      VALUES (?,?,?,?,?,?,?,'pending_release',?)`)
+      .run(payNumber, invoice_id, amt, payment_date || new Date().toISOString().slice(0, 10),
+           method || 'bank_transfer', reference || null, notes || null, req.user.id)).lastInsertRowid;
+    return { id, payNumber };
+  });
   audit(req.user.id, 'create', 'payment', id, `${payNumber} (pending release)`);
   const makerEmail = await userEmail(req.user.id);
   const headRow = await financeHead();
@@ -1924,8 +1942,8 @@ app.post('/api/tax/deposits', requireAuth, requireRole('finance'), wrap(async (r
   const amount = r2(Number(b.amount));
   if (!(amount > 0)) throw new Error('Amount must be greater than zero');
   if (!b.deposit_date) throw new Error('Deposit date is required');
-  const depNumber = await nextNumber('DEP', 'tds_deposits', 'deposit_number');
-  const id = await db.tx(async () => {
+  const { id, depNumber } = await db.tx(async () => {
+    const depNumber = await nextNumber('DEP', 'tds_deposits', 'deposit_number');
     const depId = (await db.prepare(`INSERT INTO tds_deposits (deposit_number, kind, period, section, amount, challan_no, bsr_code, deposit_date, notes, created_by)
       VALUES (?,?,?,?,?,?,?,?,?,?)`)
       .run(depNumber, kind, b.period, kind === 'tds' ? b.section : null, amount,
@@ -1933,7 +1951,7 @@ app.post('/api/tax/deposits', requireAuth, requireRole('finance'), wrap(async (r
     const dep = await db.prepare('SELECT * FROM tds_deposits WHERE id = ?').get(depId);
     const { jeId } = await postDepositJE(dep, req.user.id);
     await db.prepare('UPDATE tds_deposits SET je_id = ? WHERE id = ?').run(jeId, depId);
-    return depId;
+    return { id: depId, depNumber };
   });
   audit(req.user.id, 'create', 'tax_deposit', id, depNumber);
   res.status(201).json({ id, deposit_number: depNumber });
@@ -2211,23 +2229,29 @@ app.post('/api/vendor/invoices', requireVendorAuth, async (req, res) => {
       const gl = await prepareInvoiceGlFields(vendor, b);
 
       const match = await computeMatch(po.id, t.sub);
-      const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
-      const id = (await db.prepare(`INSERT INTO invoices
-        (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
-         place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,
-         subtotal, cgst_amount, sgst_amount, igst_amount, tax_amount, total,
-         rcm, rcm_category_id, currency, gstr2b_status,
-         status, match_status, match_notes, source, vendor_user_id, attachment_path, attachment_name)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,'vendor',?,?,?)`)
-        .run(invNumber, b.vendor_invoice_ref || null, po.id, po.vendor_id, po.company_gstin_id, b.invoice_date, receivedDate, dueDate,
-             gl.placeOfSupplyCode, gl.placeOfSupplyState, gl.hsnSacCode, gl.glDescription,
-             t.sub, t.cgst, t.sgst, t.igst, t.tax, t.total,
-             t.rcm, t.rcmCategoryId, vendor.currency || 'INR', t.gstr2bStatus,
-             match.status, match.notes, req.vendorUser.id,
-             req.file ? req.file.filename : null, req.file ? req.file.originalname : null)).lastInsertRowid;
-      const invDeptId = ((await db.prepare('SELECT department_id FROM users WHERE id = ?').get(po.created_by)) || {}).department_id || null;
-      if (invDeptId) await db.prepare('UPDATE invoices SET department_id = ? WHERE id = ?').run(invDeptId, id);
-      await approvals.createApprovals('invoice', id, invDeptId, t.total);
+      // one transaction for number + insert + approval chain: concurrent
+      // submissions can't collide on the invoice number, and a half-created
+      // invoice (no approval chain) can never be left behind
+      const { id, invNumber } = await db.tx(async () => {
+        const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
+        const id = (await db.prepare(`INSERT INTO invoices
+          (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
+           place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,
+           subtotal, cgst_amount, sgst_amount, igst_amount, tax_amount, total,
+           rcm, rcm_category_id, currency, gstr2b_status,
+           status, match_status, match_notes, source, vendor_user_id, attachment_path, attachment_name)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,'vendor',?,?,?)`)
+          .run(invNumber, b.vendor_invoice_ref || null, po.id, po.vendor_id, po.company_gstin_id, b.invoice_date, receivedDate, dueDate,
+               gl.placeOfSupplyCode, gl.placeOfSupplyState, gl.hsnSacCode, gl.glDescription,
+               t.sub, t.cgst, t.sgst, t.igst, t.tax, t.total,
+               t.rcm, t.rcmCategoryId, vendor.currency || 'INR', t.gstr2bStatus,
+               match.status, match.notes, req.vendorUser.id,
+               req.file ? req.file.filename : null, req.file ? req.file.originalname : null)).lastInsertRowid;
+        const invDeptId = ((await db.prepare('SELECT department_id FROM users WHERE id = ?').get(po.created_by)) || {}).department_id || null;
+        if (invDeptId) await db.prepare('UPDATE invoices SET department_id = ? WHERE id = ?').run(invDeptId, id);
+        await approvals.createApprovals('invoice', id, invDeptId, t.total);
+        return { id, invNumber };
+      });
       audit(null, 'portal_submit', 'invoice', id, `${invNumber} by ${req.vendorUser.vendor_name}`);
       res.status(201).json({ id, invoice_number: invNumber, match_status: match.status });
     } catch (e) {

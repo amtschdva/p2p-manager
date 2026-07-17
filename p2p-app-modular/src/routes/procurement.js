@@ -45,15 +45,15 @@ module.exports = function register(app) {
     const deptId = Number(department_id) || req.user.department_id || null;
     const dept = deptId ? await db.prepare('SELECT * FROM departments WHERE id = ?').get(deptId) : null;
     const estimate = items.reduce((s, it) => s + Number(it.quantity) * (Number(it.est_unit_price) || 0), 0);
-    const prNumber = await nextNumber('PR', 'prs', 'pr_number');
-    const id = await db.tx(async () => {
+    const { id, prNumber } = await db.tx(async () => {
+      const prNumber = await nextNumber('PR', 'prs', 'pr_number');
       const prId = (await db.prepare('INSERT INTO prs (pr_number, requester_id, department, department_id, needed_by, justification) VALUES (?,?,?,?,?,?)')
         .run(prNumber, req.user.id, dept ? dept.name : null, deptId, needed_by || null, justification || null)).lastInsertRowid;
       // item_id links a line to the items master once the inventory module lands
       const ins = db.prepare('INSERT INTO pr_items (pr_id, item_id, description, quantity, unit, est_unit_price) VALUES (?,?,?,?,?,?)');
       for (const it of items) await ins.run(prId, Number(it.item_id) || null, it.description, Number(it.quantity), it.unit || 'EA', Number(it.est_unit_price) || 0);
       await approvals.createApprovals('pr', prId, deptId, estimate);
-      return prId;
+      return { id: prId, prNumber };
     });
     audit(req.user.id, 'create', 'pr', id, prNumber);
     const step = await approvals.currentStep('pr', id);
@@ -153,14 +153,14 @@ module.exports = function register(app) {
       if (!pr) throw new Error('Linked PR not found');
       if (pr.status !== 'approved') throw new Error('PO can only be created from an approved PR');
     }
-    const poNumber = await nextNumber('PO', 'pos', 'po_number');
-    const id = await db.tx(async () => {
+    const { id, poNumber } = await db.tx(async () => {
+      const poNumber = await nextNumber('PO', 'pos', 'po_number');
       const poId = (await db.prepare('INSERT INTO pos (po_number, pr_id, vendor_id, company_gstin_id, created_by, expected_date, notes) VALUES (?,?,?,?,?,?,?)')
         .run(poNumber, pr_id || null, vendor_id, gstin ? gstin.id : null, req.user.id, expected_date || null, notes || null)).lastInsertRowid;
       const ins = db.prepare('INSERT INTO po_items (po_id, item_id, description, quantity, unit, unit_price) VALUES (?,?,?,?,?,?)');
       for (const it of items) await ins.run(poId, Number(it.item_id) || null, it.description, Number(it.quantity), it.unit || 'EA', Number(it.unit_price) || 0);
       if (pr_id) await db.prepare(`UPDATE prs SET status='converted' WHERE id=?`).run(pr_id);
-      return poId;
+      return { id: poId, poNumber };
     });
     audit(req.user.id, 'create', 'po', id, poNumber);
     res.status(201).json({ id, po_number: poNumber });
@@ -232,8 +232,8 @@ module.exports = function register(app) {
     }
     if (!anyQty) throw new Error('Enter a received quantity on at least one line');
 
-    const grnNumber = await nextNumber('GRN', 'grns', 'grn_number');
-    const id = await db.tx(async () => {
+    const { id, grnNumber } = await db.tx(async () => {
+      const grnNumber = await nextNumber('GRN', 'grns', 'grn_number');
       const grnId = (await db.prepare(`INSERT INTO grns (grn_number, po_id, received_by, received_date, notes, status) VALUES (?,?,?,?,?,'pending')`)
         .run(grnNumber, po_id, req.user.id, received_date || new Date().toISOString().slice(0, 10), notes || null)).lastInsertRowid;
       const ins = db.prepare('INSERT INTO grn_items (grn_id, po_item_id, quantity_received, condition_notes) VALUES (?,?,?,?)');
@@ -241,7 +241,7 @@ module.exports = function register(app) {
         const qty = Number(it.quantity_received) || 0;
         if (qty > 0) await ins.run(grnId, it.po_item_id, qty, it.condition_notes || null);
       }
-      return grnId;
+      return { id: grnId, grnNumber };
     });
     audit(req.user.id, 'create', 'grn', id, grnNumber);
     sendMail(usersByRole('approver', 'admin'),

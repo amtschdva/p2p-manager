@@ -25,17 +25,24 @@ module.exports = function register(app) {
     }
     const amt = Number(amount);
     if (!(amt > 0)) throw new Error('Payment amount must be greater than zero');
-    // vendor is owed total − TDS; released AND pending payments both consume the balance
-    const netPayable = r2(inv.total - inv.tds_amount);
-    const committed = (await db.prepare(`SELECT COALESCE(SUM(amount),0) s FROM payments WHERE invoice_id = ? AND status != 'cancelled'`).get(invoice_id)).s;
-    const outstanding = r2(netPayable - committed);
-    if (amt > outstanding + 0.01) throw new Error(`Amount exceeds outstanding balance of ₹${outstanding.toFixed(2)} (net of TDS, incl. payments awaiting release)`);
+    // Balance check + insert in one transaction, with the invoice row locked:
+    // two payments prepared at the same moment would otherwise both read the
+    // old committed total and together overshoot the outstanding balance.
+    const { id, payNumber } = await db.tx(async () => {
+      await db.prepare('SELECT id FROM invoices WHERE id = ? FOR UPDATE').get(invoice_id);
+      // vendor is owed total − TDS; released AND pending payments both consume the balance
+      const netPayable = r2(inv.total - inv.tds_amount);
+      const committed = (await db.prepare(`SELECT COALESCE(SUM(amount),0) s FROM payments WHERE invoice_id = ? AND status != 'cancelled'`).get(invoice_id)).s;
+      const outstanding = r2(netPayable - committed);
+      if (amt > outstanding + 0.01) throw new Error(`Amount exceeds outstanding balance of ₹${outstanding.toFixed(2)} (net of TDS, incl. payments awaiting release)`);
 
-    const payNumber = await nextNumber('PAY', 'payments', 'payment_number');
-    const id = (await db.prepare(`INSERT INTO payments (payment_number, invoice_id, amount, payment_date, method, reference, notes, status, created_by)
-      VALUES (?,?,?,?,?,?,?,'pending_release',?)`)
-      .run(payNumber, invoice_id, amt, payment_date || new Date().toISOString().slice(0, 10),
-           method || 'bank_transfer', reference || null, notes || null, req.user.id)).lastInsertRowid;
+      const payNumber = await nextNumber('PAY', 'payments', 'payment_number');
+      const id = (await db.prepare(`INSERT INTO payments (payment_number, invoice_id, amount, payment_date, method, reference, notes, status, created_by)
+        VALUES (?,?,?,?,?,?,?,'pending_release',?)`)
+        .run(payNumber, invoice_id, amt, payment_date || new Date().toISOString().slice(0, 10),
+             method || 'bank_transfer', reference || null, notes || null, req.user.id)).lastInsertRowid;
+      return { id, payNumber };
+    });
     audit(req.user.id, 'create', 'payment', id, `${payNumber} (pending release)`);
     const makerEmail = await userEmail(req.user.id);
     const headRow = await financeHead();

@@ -71,13 +71,15 @@ module.exports = function register(app) {
         const gl = await prepareInvoiceGlFields(vendor, b);
 
         const match = await computeMatch(po.id, t.sub);
-        const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
         // route the approval chain via the uploader's department, falling back to
         // the PO owner's department (dept head first, then finance)
         const invDeptId = req.user.department_id
           || (await db.prepare('SELECT department_id FROM users WHERE id = ?').get(po.created_by) || {}).department_id
           || null;
-        const id = await db.tx(async () => {
+        // number allocation lives inside the same transaction as the insert so
+        // concurrent submissions can't grab the same invoice number
+        const { id, invNumber } = await db.tx(async () => {
+          const invNumber = await nextNumber('INV', 'invoices', 'invoice_number');
           const invId = (await db.prepare(`INSERT INTO invoices
             (invoice_number, vendor_invoice_ref, po_id, vendor_id, company_gstin_id, invoice_date, received_date, due_date,
              place_of_supply_code, place_of_supply_state, hsn_sac_code, gl_description,
@@ -94,7 +96,7 @@ module.exports = function register(app) {
                  req.file ? req.file.filename : null, req.file ? req.file.originalname : null,
                  req.user.id)).lastInsertRowid;
           await approvals.createApprovals('invoice', invId, invDeptId, t.total);
-          return invId;
+          return { id: invId, invNumber };
         });
         audit(req.user.id, 'create', 'invoice', id, invNumber);
         const step = await approvals.currentStep('invoice', id);
@@ -153,21 +155,6 @@ module.exports = function register(app) {
       tdsRate = Number(b.tds_rate);
       if (!(tdsRate >= 0 && tdsRate <= 40)) throw new Error('TDS rate must be between 0 and 40%');
       tdsAmount = r2(inv.subtotal * tdsRate / 100);
-      if (b.tds_certificate_id) {
-        const cert = await db.prepare(`SELECT * FROM vendor_tds_certificates WHERE id = ? AND vendor_id = ? AND tds_section = ? AND active = 1
-          AND valid_from <= ? AND valid_to >= ?`).get(Number(b.tds_certificate_id), inv.vendor_id, tdsSection, inv.invoice_date, inv.invoice_date);
-        if (!cert) throw new Error('That lower-TDS certificate is not valid for this vendor/section on the invoice date');
-        // the lower rate applies only up to the certificate's threshold (its
-        // authorised limit) — whichever comes first between that and its validity window
-        if (cert.threshold_amount != null) {
-          const utilized = (await db.prepare(`SELECT COALESCE(SUM(subtotal), 0) AS s FROM invoices
-            WHERE tds_certificate_id = ? AND status NOT IN ('rejected', 'cancelled') AND id != ?`).get(cert.id, inv.id)).s;
-          if (utilized + inv.subtotal > cert.threshold_amount) {
-            throw new Error(`This certificate's threshold of ₹${cert.threshold_amount} would be exceeded (₹${utilized} already used + ₹${inv.subtotal} on this invoice) — use the standard TDS rate instead`);
-          }
-        }
-        tdsCertificateId = cert.id;
-      }
     } else {
       tdsSection = null;
     }
@@ -194,6 +181,30 @@ module.exports = function register(app) {
     }
 
     const result = await db.tx(async () => {
+      // Lock the invoice row and re-verify it is still pending: two final
+      // approvals racing each other would otherwise both book it (double JE).
+      const locked = await db.prepare('SELECT status FROM invoices WHERE id = ? FOR UPDATE').get(inv.id);
+      if (!locked || locked.status !== 'pending') {
+        throw new Error(`Invoice was already processed (status "${locked ? locked.status : 'missing'}")`);
+      }
+      // Certificate validation + threshold check under a row lock, in the same
+      // transaction as the booking: concurrent approvals against the same
+      // certificate serialize here, so its threshold can never be overshot.
+      if (taxModule && tdsSection && b.tds_certificate_id) {
+        const cert = await db.prepare(`SELECT * FROM vendor_tds_certificates WHERE id = ? AND vendor_id = ? AND tds_section = ? AND active = 1
+          AND valid_from <= ? AND valid_to >= ? FOR UPDATE`).get(Number(b.tds_certificate_id), inv.vendor_id, tdsSection, inv.invoice_date, inv.invoice_date);
+        if (!cert) throw new Error('That lower-TDS certificate is not valid for this vendor/section on the invoice date');
+        // the lower rate applies only up to the certificate's threshold (its
+        // authorised limit) — whichever comes first between that and its validity window
+        if (cert.threshold_amount != null) {
+          const utilized = (await db.prepare(`SELECT COALESCE(SUM(subtotal), 0) AS s FROM invoices
+            WHERE tds_certificate_id = ? AND status NOT IN ('rejected', 'cancelled') AND id != ?`).get(cert.id, inv.id)).s;
+          if (utilized + inv.subtotal > cert.threshold_amount) {
+            throw new Error(`This certificate's threshold of ₹${cert.threshold_amount} would be exceeded (₹${utilized} already used + ₹${inv.subtotal} on this invoice) — use the standard TDS rate instead`);
+          }
+        }
+        tdsCertificateId = cert.id;
+      }
       await approvals.act('invoice', inv.id, req.user, true, b.comment, inv.department_id);
       await db.prepare(`UPDATE invoices SET status='approved', approved_by=?, tds_section=?, tds_rate=?, tds_amount=?, tds_certificate_id=?,
                   itc_eligibility=?, igst_amount=?, tax_amount=?, sub_location=?, cost_centre=?, program_product_code=?, gl_period=?,

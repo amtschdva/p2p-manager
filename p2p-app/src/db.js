@@ -600,6 +600,12 @@ async function resetSchema() {
 
 // ---------- helpers ----------
 async function nextNumber(prefix, table, column) {
+  // Serialize number allocation per table: without this, concurrent inserts
+  // read the same current maximum and collide on the UNIQUE constraint. The
+  // advisory lock is held until the enclosing transaction commits, so ALWAYS
+  // call this inside db.tx together with the INSERT that uses the number —
+  // that keeps numbering both collision-free and gapless.
+  await prepare('SELECT pg_advisory_xact_lock(hashtext(?))').get(table);
   const row = await prepare(`SELECT ${column} AS num FROM ${table} ORDER BY id DESC LIMIT 1`).get();
   const year = new Date().getFullYear();
   let seq = 1;
