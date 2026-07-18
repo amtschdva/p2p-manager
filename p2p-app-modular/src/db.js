@@ -604,6 +604,27 @@ async function init() {
     ALTER TABLE journal_lines ADD COLUMN IF NOT EXISTS custom_field_5 TEXT;
   `);
 
+  // Indexes for the hot query paths (idempotent). Foreign-key columns are not
+  // indexed automatically in Postgres; these cover approval-chain lookups,
+  // department-scoped visibility filters, journal/statement reads, payment
+  // outstanding sums, certificate-threshold sums and the activity feed.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_doc_approvals_doc ON doc_approvals (doc_type, doc_id);
+    CREATE INDEX IF NOT EXISTS idx_invoices_department ON invoices (department_id);
+    CREATE INDEX IF NOT EXISTS idx_invoices_po ON invoices (po_id);
+    CREATE INDEX IF NOT EXISTS idx_invoices_vendor ON invoices (vendor_id);
+    CREATE INDEX IF NOT EXISTS idx_invoices_tds_certificate ON invoices (tds_certificate_id);
+    CREATE INDEX IF NOT EXISTS idx_journal_lines_je ON journal_lines (je_id);
+    CREATE INDEX IF NOT EXISTS idx_journal_lines_vendor ON journal_lines (vendor_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments (invoice_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log (user_id);
+    CREATE INDEX IF NOT EXISTS idx_pr_items_pr ON pr_items (pr_id);
+    CREATE INDEX IF NOT EXISTS idx_po_items_po ON po_items (po_id);
+    CREATE INDEX IF NOT EXISTS idx_grn_items_grn ON grn_items (grn_id);
+    CREATE INDEX IF NOT EXISTS idx_grn_items_po_item ON grn_items (po_item_id);
+    CREATE INDEX IF NOT EXISTS idx_vendor_tds_certificates_vendor ON vendor_tds_certificates (vendor_id);
+  `);
+
   // One-time migration: financial columns were DOUBLE PRECISION before
   // 2026-07. Binary floats can't represent paise exactly, so everything
   // financial moves to fixed-point NUMERIC (money 15,2 · quantities 15,3 ·

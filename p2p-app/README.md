@@ -201,7 +201,10 @@ app's own ledger:
   vendor is GST-registered.
 - **Lower/nil TDS deduction certificates** — capture rate, an optional
   threshold amount, validity window, and the certificate document per
-  vendor+section (🎫 button on the Vendors page and vendor edit form). A
+  vendor+section (🎫 button on the Vendors page and vendor edit form).
+  The certificate document is **mandatory** (it is the legal basis for the
+  lower rate), and only one active certificate may cover a given
+  vendor+section validity window at a time — deactivate the old one first. A
   certificate valid for the chosen section on the invoice date suggests its
   rate at final approval instead of the section's master rate; finance can
   still override. The lower rate applies only until invoices booked against

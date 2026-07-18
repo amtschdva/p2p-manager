@@ -481,6 +481,14 @@ app.post('/api/vendors/:id/tds-certificates', requireAuth, requireRole('finance'
       if (b.valid_to < b.valid_from) throw new Error('Valid-to date must be on or after valid-from');
       const thresholdAmount = b.threshold_amount !== undefined && b.threshold_amount !== '' ? Number(b.threshold_amount) : null;
       if (thresholdAmount !== null && !(thresholdAmount > 0)) throw new Error('Threshold amount must be greater than zero');
+      // the certificate document is the legal basis for the lower rate — required
+      if (!req.file) throw new Error('Attach the certificate document (PDF/PNG/JPG)');
+      // one active certificate per vendor+section at a time — overlapping
+      // validity windows would make the suggested rate ambiguous
+      const overlap = await db.prepare(`SELECT certificate_number FROM vendor_tds_certificates
+        WHERE vendor_id = ? AND tds_section = ? AND active = 1 AND valid_from <= ? AND valid_to >= ?`)
+        .get(vendor.id, b.tds_section.trim(), b.valid_to, b.valid_from);
+      if (overlap) throw new Error(`Certificate ${overlap.certificate_number} already covers part of this validity window for ${b.tds_section.trim()} — deactivate it first or adjust the dates`);
       let filePath = null, fileName = null;
       if (req.file) {
         const head = req.file.buffer.subarray(0, 8);

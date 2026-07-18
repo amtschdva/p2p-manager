@@ -522,17 +522,45 @@ test('lower-TDS certificate: valid cert suggests its rate and is recorded on the
   }
   await call('POST', `/api/vendors/${certVendorId}/verify`, { token: rahul, body: { ap_account_code: 'AP-LOWERTDS' } });
 
+  // the certificate document itself is mandatory — no file, no certificate
+  const noFile = await call('POST', `/api/vendors/${certVendorId}/tds-certificates`, {
+    token: rahul,
+    form: (() => {
+      const fd = new FormData();
+      fd.append('tds_section', '194C'); fd.append('certificate_number', 'LDC-000'); fd.append('rate', '1');
+      fd.append('valid_from', '2026-01-01'); fd.append('valid_to', '2026-12-31');
+      return fd;
+    })(),
+  });
+  assert.equal(noFile.status, 400);
+  assert.match(noFile.json.error, /attach the certificate/i);
+
   const certRes = await call('POST', `/api/vendors/${certVendorId}/tds-certificates`, {
     token: rahul,
     form: (() => {
       const fd = new FormData();
       fd.append('tds_section', '194C'); fd.append('certificate_number', 'LDC-001'); fd.append('rate', '1');
       fd.append('valid_from', '2026-01-01'); fd.append('valid_to', '2026-12-31');
+      fd.append('file', pdfBlob(), 'cert.pdf');
       return fd;
     })(),
   });
   assert.equal(certRes.status, 201, certRes.text);
   const certId = certRes.json.id;
+
+  // a second ACTIVE certificate for the same vendor+section may not overlap
+  const overlapping = await call('POST', `/api/vendors/${certVendorId}/tds-certificates`, {
+    token: rahul,
+    form: (() => {
+      const fd = new FormData();
+      fd.append('tds_section', '194C'); fd.append('certificate_number', 'LDC-002'); fd.append('rate', '0.5');
+      fd.append('valid_from', '2026-06-01'); fd.append('valid_to', '2027-05-31');
+      fd.append('file', pdfBlob(), 'cert.pdf');
+      return fd;
+    })(),
+  });
+  assert.equal(overlapping.status, 400);
+  assert.match(overlapping.json.error, /already covers/i);
 
   // the vendor list flags this vendor as having a currently-usable certificate
   const vendorsAfterCert = await call('GET', '/api/vendors', { token: rahul });
@@ -593,6 +621,7 @@ test('lower-TDS certificate: threshold caps cumulative usage, not just the valid
       fd.append('tds_section', '194C'); fd.append('certificate_number', 'LDC-TH-001'); fd.append('rate', '1');
       fd.append('threshold_amount', '60000');
       fd.append('valid_from', '2026-01-01'); fd.append('valid_to', '2026-12-31');
+      fd.append('file', pdfBlob(), 'cert.pdf');
       return fd;
     })(),
   });

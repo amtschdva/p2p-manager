@@ -569,7 +569,7 @@ async function openVendorTdsCertsModal(vendor) {
           <input name="threshold_amount" type="number" min="0" step="any"></div>
         <div class="field"><label>Valid from *</label><input name="valid_from" type="date" required></div>
         <div class="field"><label>Valid to *</label><input name="valid_to" type="date" required></div>
-        <div class="field"><label>Certificate file (PDF/PNG/JPG)</label><input name="file" type="file" accept=".pdf,.png,.jpg,.jpeg"></div>
+        <div class="field"><label>Certificate file (PDF/PNG/JPG) *</label><input name="file" type="file" accept=".pdf,.png,.jpg,.jpeg" required></div>
       </div>
       <div class="form-actions">
         <button type="button" class="btn" onclick="closeModal()">Close</button>
