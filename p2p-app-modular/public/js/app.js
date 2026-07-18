@@ -160,6 +160,9 @@ function applyChartTheme() {
   const cs = getComputedStyle(document.documentElement);
   Chart.defaults.color = cs.getPropertyValue('--text-muted').trim();
   Chart.defaults.borderColor = cs.getPropertyValue('--border').trim();
+  // doughnut/pie segment separators default to white — use the card surface
+  // so they blend with the chart's background in either theme
+  Chart.defaults.elements.arc.borderColor = cs.getPropertyValue('--surface').trim();
 }
 applyChartTheme();
 $('#btn-theme')?.addEventListener('click', () => {
@@ -1894,7 +1897,7 @@ async function renderStatements(main) {
             <td class="num">${fmtMoney(l.balance)}</td>
           </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No ledger activity for this vendor</td></tr>'}
         </tbody>
-        ${d.lines.length ? `<tfoot><tr style="background:#f8fafc;font-weight:700"><td colspan="6">Closing balance owed to ${esc(d.vendor.name)}</td><td class="num">${fmtMoney(d.balance)}</td></tr></tfoot>` : ''}
+        ${d.lines.length ? `<tfoot><tr style="background:var(--surface-2);font-weight:700"><td colspan="6">Closing balance owed to ${esc(d.vendor.name)}</td><td class="num">${fmtMoney(d.balance)}</td></tr></tfoot>` : ''}
       </table></div>`;
   });
 }
