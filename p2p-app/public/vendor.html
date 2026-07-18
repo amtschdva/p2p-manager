@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script>document.documentElement.dataset.theme = localStorage.getItem('p2p_theme') || 'light';</script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Vendor Portal — P2P Manager</title>
@@ -90,6 +91,7 @@
       <div style="display:flex;align-items:center;gap:12px">
         <span id="vendor-name" style="font-weight:600"></span>
         <span id="vendor-verify-badge"></span>
+        <button id="vbtn-theme" class="btn btn-ghost btn-sm" title="Toggle dark theme">🌓</button>
         <button id="vbtn-logout" class="btn btn-ghost btn-sm">Sign out</button>
       </div>
     </div>

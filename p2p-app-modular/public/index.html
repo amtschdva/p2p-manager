@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script>document.documentElement.dataset.theme = localStorage.getItem('p2p_theme') || 'light';</script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>P2P Manager — Procure to Pay</title>
@@ -53,6 +54,7 @@
         <div id="user-badge" class="user-badge"></div>
         <button id="btn-change-pw" class="btn btn-ghost btn-sm">Change password</button>
         <button id="btn-2fa" class="btn btn-ghost btn-sm">Two-factor auth</button>
+        <button id="btn-theme" class="btn btn-ghost btn-sm" title="Toggle dark theme">🌓 Theme</button>
         <button id="btn-logout" class="btn btn-ghost btn-sm">Sign out</button>
       </div>
     </aside>

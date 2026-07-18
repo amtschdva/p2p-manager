@@ -151,6 +151,24 @@ $('#totp-back').addEventListener('click', () => {
 });
 
 $('#btn-logout').addEventListener('click', logout);
+
+// ---------- theme ----------
+// Chart.js draws its own text/grid colors — feed it the active theme's
+// palette so dashboard charts stay legible in dark mode.
+function applyChartTheme() {
+  if (typeof Chart === 'undefined') return;
+  const cs = getComputedStyle(document.documentElement);
+  Chart.defaults.color = cs.getPropertyValue('--text-muted').trim();
+  Chart.defaults.borderColor = cs.getPropertyValue('--border').trim();
+}
+applyChartTheme();
+$('#btn-theme')?.addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('p2p_theme', next);
+  applyChartTheme();
+  if (TOKEN) route(); // re-render so charts pick up the new palette
+});
 $('#btn-change-pw').addEventListener('click', () => openChangePassword());
 $('#btn-2fa').addEventListener('click', () => openTotpModal());
 

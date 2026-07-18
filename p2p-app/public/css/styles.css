@@ -1,6 +1,7 @@
 :root {
   --bg: #f4f6fa;
   --surface: #ffffff;
+  --surface-2: #f8fafc;
   --border: #e2e8f0;
   --text: #1e293b;
   --text-muted: #64748b;
@@ -52,6 +53,7 @@ body {
 .login-card input {
   display: block; width: 100%; margin-top: 5px;
   padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px;
+  background: var(--surface); color: var(--text);
 }
 .login-hint {
   margin-top: 22px; font-size: 12px; color: var(--text-muted);
@@ -111,8 +113,8 @@ body {
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-muted); background: #f8fafc; }
-tbody tr:hover { background: #f8fafc; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-muted); background: var(--surface-2); }
+tbody tr:hover { background: var(--surface-2); }
 td.wrap { white-space: normal; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 th.num { text-align: right; }
@@ -160,7 +162,7 @@ th.num { text-align: right; }
 .field label { display: block; font-weight: 600; font-size: 12.5px; margin-bottom: 5px; }
 .field input, .field select, .field textarea {
   width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; font-size: 13.5px; font-family: inherit;
-  background: #fff;
+  background: var(--surface); color: var(--text);
 }
 .field textarea { resize: vertical; min-height: 64px; }
 .form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
@@ -169,7 +171,7 @@ th.num { text-align: right; }
 .items-editor { margin-top: 16px; }
 .items-editor h4 { font-size: 13px; margin-bottom: 8px; }
 .item-row { display: grid; grid-template-columns: 1fr 80px 70px 110px 34px; gap: 8px; margin-bottom: 8px; align-items: center; }
-.item-row input { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; width: 100%; }
+.item-row input { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; width: 100%; background: var(--surface); color: var(--text); }
 .item-row .remove-item { background: none; border: none; color: var(--red); font-size: 18px; cursor: pointer; }
 .items-header { display: grid; grid-template-columns: 1fr 80px 70px 110px 34px; gap: 8px; font-size: 11.5px; color: var(--text-muted); font-weight: 600; margin-bottom: 5px; }
 
@@ -183,8 +185,9 @@ th.num { text-align: right; }
 .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .toolbar input[type="search"] {
   padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13.5px; min-width: 220px;
+  background: var(--surface); color: var(--text);
 }
-.toolbar select { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13.5px; }
+.toolbar select { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13.5px; background: var(--surface); color: var(--text); }
 
 /* ---------- Toast ---------- */
 .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
@@ -209,3 +212,32 @@ th.num { text-align: right; }
   .main { padding: 18px 14px; }
   .form-grid { grid-template-columns: 1fr; }
 }
+
+/* ---------- Dark theme (subtle) ----------
+   The sidebar is dark in both themes; this dims the main window. Toggled by
+   the moon button in the sidebar / portal topbar, persisted as p2p_theme. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #141922;
+  --surface: #1c232e;
+  --surface-2: #232c39;
+  --border: #303a49;
+  --text: #dce3ed;
+  --text-muted: #94a1b3;
+  --primary: #3f82f7;
+  --primary-dark: #2f6ce0;
+  --shadow: 0 1px 3px rgba(0,0,0,0.35), 0 4px 12px rgba(0,0,0,0.25);
+}
+:root[data-theme="dark"] .btn:hover { filter: brightness(1.15); }
+:root[data-theme="dark"] .badge-gray { background: #2b3443; color: #aab6c6; }
+:root[data-theme="dark"] .badge-blue { background: rgba(59,130,246,0.18); color: #7fb0ff; }
+:root[data-theme="dark"] .badge-green { background: rgba(34,197,94,0.16); color: #5ad584; }
+:root[data-theme="dark"] .badge-amber { background: rgba(245,158,11,0.16); color: #f0b35c; }
+:root[data-theme="dark"] .badge-red { background: rgba(239,68,68,0.16); color: #f28b8b; }
+:root[data-theme="dark"] .badge-purple { background: rgba(139,92,246,0.18); color: #b7a0f8; }
+:root[data-theme="dark"] .btn-danger { background: rgba(239,68,68,0.14); color: #f28b8b; border-color: rgba(239,68,68,0.3); }
+:root[data-theme="dark"] .btn-success { background: rgba(34,197,94,0.14); color: #5ad584; border-color: rgba(34,197,94,0.3); }
+:root[data-theme="dark"] .form-error { background: rgba(239,68,68,0.14); color: #f28b8b; }
+:root[data-theme="dark"] .login-hint code { background: #2b3443; }
+:root[data-theme="dark"] .modal-backdrop { background: rgba(0,0,0,0.6); }
+:root[data-theme="dark"] .login-logo { color: #e7edf5; }

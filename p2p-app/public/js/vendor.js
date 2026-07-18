@@ -62,6 +62,11 @@ function logout() {
   showAuth();
 }
 $('#vbtn-logout').addEventListener('click', logout);
+$('#vbtn-theme')?.addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('p2p_theme', next);
+});
 
 // ---------- auth screen ----------
 function showAuth() {
