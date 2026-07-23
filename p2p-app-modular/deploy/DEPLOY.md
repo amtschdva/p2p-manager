@@ -149,6 +149,27 @@ docker compose restart app            # restart
 
 The app applies its own database migrations on startup, so redeploys are safe.
 
+## Troubleshooting
+
+**404 / app keeps restarting, log shows `EACCES: permission denied, mkdir '/app/data/uploads'`**
+Docker created the bind-mounted `data/` folder as **root**, but the container
+runs as the unprivileged `node` user (uid 1000), so it cannot write there.
+Fix it on the host and restart:
+```bash
+sudo chown -R 1000:1000 <path-to-app>/data
+docker compose up -d
+```
+(The app now detects this at startup and prints these exact instructions
+instead of a raw stack trace.)
+
+**502 / 504 from an existing shared Traefik**
+When the app container is attached to more than one Docker network, Traefik
+may try to reach it on the wrong one. Pin it by adding this label to the
+`app` service and re-running `docker compose up -d`:
+```yaml
+      - traefik.docker.network=<your-shared-traefik-network>
+```
+
 ## Security checklist
 
 - [ ] DNS + HTTPS working, HTTP redirects to HTTPS

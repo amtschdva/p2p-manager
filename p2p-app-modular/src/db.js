@@ -21,6 +21,19 @@ const { AsyncLocalStorage } = require('async_hooks');
 
 const DATA_DIR = process.env.P2P_DATA_DIR || path.join(__dirname, '..', 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
+// Fail loud and clear when the data dir isn't writable. The classic cause:
+// Docker auto-creates a missing bind-mount source as root, while the
+// container runs as the unprivileged node user (uid 1000) — every upload
+// subdirectory mkdir then dies with a bare EACCES stack trace.
+try {
+  fs.accessSync(DATA_DIR, fs.constants.W_OK);
+} catch {
+  console.error(`FATAL: data directory ${DATA_DIR} is not writable by this process (uid ${process.getuid ? process.getuid() : '?'}).`);
+  console.error('If this app runs in Docker with a bind-mounted data folder, the host folder is');
+  console.error('probably owned by root. Fix it on the HOST and restart the container:');
+  console.error('  sudo chown -R 1000:1000 <path-to-app>/data');
+  process.exit(1);
+}
 
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://p2p:p2p@localhost:5433/p2p_mod';
 
