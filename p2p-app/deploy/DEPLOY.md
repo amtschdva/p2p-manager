@@ -162,6 +162,19 @@ docker compose up -d
 (The app now detects this at startup and prints these exact instructions
 instead of a raw stack trace.)
 
+**Login page loads unstyled (plain text) and goes blank after sign-in — served over plain HTTP without TLS**
+In production the app tells the browser to upgrade every asset request to
+`https://` (safe behind Traefik's TLS). If you run it over plain HTTP —
+Traefik removed and the port published directly, or a proxy that doesn't
+terminate TLS — `/css` and `/js` get upgraded to a URL the server can't
+answer, so the page loads with no styling and a dead SPA. Set
+`INSECURE_HTTP=1` in `.env` (or the app service's environment) and restart:
+```bash
+docker compose up -d
+```
+Better still, put a TLS reverse proxy in front (Traefik/Caddy/nginx) and
+leave `INSECURE_HTTP` unset.
+
 **502 / 504 from an existing shared Traefik**
 When the app container is attached to more than one Docker network, Traefik
 may try to reach it on the wrong one. Pin it by adding this label to the

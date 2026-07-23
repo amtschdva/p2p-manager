@@ -6,6 +6,13 @@ const helmet = require('helmet');
 const path = require('path');
 const { PROD } = require('./context');
 
+// Is the app actually reached over HTTPS? True in production behind Traefik/any
+// TLS proxy (the default). When serving plain HTTP directly or behind a proxy
+// that does NOT terminate TLS, set INSECURE_HTTP=1 — otherwise the browser's
+// upgrade-insecure-requests rewrites every /css and /js request to https://,
+// so the page loads unstyled with a dead SPA (blank after login).
+const HTTPS_UPFRONT = PROD && process.env.INSECURE_HTTP !== '1';
+
 function createBaseApp({ serveIndex = true } = {}) {
   const app = express();
 
@@ -25,14 +32,13 @@ function createBaseApp({ serveIndex = true } = {}) {
         connectSrc: ["'self'"],
         objectSrc: ["'none'"],
         frameAncestors: ["'none'"],
-        // helmet adds upgrade-insecure-requests by default, which forces HTTPS and
-        // breaks plain-HTTP localhost testing (Safari enforces it strictly).
-        // In production everything is behind Traefik TLS, where it is a no-op anyway.
-        ...(PROD ? {} : { upgradeInsecureRequests: null }),
+        // only force-upgrade http->https when TLS is actually in front, else
+        // plain-HTTP deployments can't load their own /css and /js
+        ...(HTTPS_UPFRONT ? {} : { upgradeInsecureRequests: null }),
       },
     },
-    // HSTS only makes sense once served over HTTPS; Traefik terminates TLS
-    strictTransportSecurity: PROD ? { maxAge: 15552000 } : false,
+    // HSTS only makes sense once served over HTTPS
+    strictTransportSecurity: HTTPS_UPFRONT ? { maxAge: 15552000 } : false,
   }));
 
   app.use(express.json());

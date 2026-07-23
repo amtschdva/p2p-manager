@@ -22,6 +22,12 @@ authenticator.options = { window: 1 }; // tolerate ±30s clock drift
 const app = express();
 const PORT = process.env.PORT || 9138;
 const PROD = process.env.NODE_ENV === 'production';
+// Is the app actually reached over HTTPS? True in production behind Traefik/any
+// TLS proxy (the default). When serving plain HTTP directly or behind a proxy
+// that does NOT terminate TLS, set INSECURE_HTTP=1 — otherwise the browser's
+// upgrade-insecure-requests rewrites every /css and /js request to https://,
+// so the page loads unstyled with a dead SPA (blank after login).
+const HTTPS_UPFRONT = PROD && process.env.INSECURE_HTTP !== '1';
 if (PROD && !process.env.JWT_SECRET) {
   console.error('FATAL: JWT_SECRET must be set in production (e.g. openssl rand -hex 32)');
   process.exit(1);
@@ -45,14 +51,13 @@ app.use(helmet({
       connectSrc: ["'self'"],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
-      // helmet adds upgrade-insecure-requests by default, which forces HTTPS and
-      // breaks plain-HTTP localhost testing (Safari enforces it strictly).
-      // In production everything is behind Traefik TLS, where it is a no-op anyway.
-      ...(PROD ? {} : { upgradeInsecureRequests: null }),
+      // only force-upgrade http->https when TLS is actually in front, else
+      // plain-HTTP deployments can't load their own /css and /js
+      ...(HTTPS_UPFRONT ? {} : { upgradeInsecureRequests: null }),
     },
   },
-  // HSTS only makes sense once served over HTTPS; Traefik terminates TLS
-  strictTransportSecurity: PROD ? { maxAge: 15552000 } : false,
+  // HSTS only makes sense once served over HTTPS
+  strictTransportSecurity: HTTPS_UPFRONT ? { maxAge: 15552000 } : false,
 }));
 
 // throttle credential endpoints against brute force / bulk fake registrations
