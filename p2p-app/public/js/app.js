@@ -1645,23 +1645,22 @@ async function renderMyApprovals(main) {
 
 // ---------- journal entries ----------
 async function renderJournal(main) {
+  const canExport = is('finance');
   const qs = (f) => {
     const p = new URLSearchParams();
     if (f.type) p.set('type', f.type);
     if (f.from) p.set('from', f.from);
     if (f.to) p.set('to', f.to);
+    if (f.export_status) p.set('export_status', f.export_status);
     return p.toString();
   };
   const draw = async (f = {}) => {
     const entries = await api('/journal' + (qs(f) ? '?' + qs(f) : ''));
-    const exportQs = qs(f) ? '&' + qs(f) : '';
-    $('#je-export').innerHTML = `
-      <a class="btn btn-sm" href="/api/journal/export?format=csv&token=${encodeURIComponent(TOKEN)}${exportQs}">⬇ CSV</a>
-      <a class="btn btn-sm" href="/api/journal/export?format=xlsx&token=${encodeURIComponent(TOKEN)}${exportQs}">⬇ Excel</a>`;
     $('#je-list').innerHTML = entries.length ? entries.map((je) => `
       <div class="card" style="margin-bottom:12px">
         <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:6px">
           <div><strong>${esc(je.je_number)}</strong> · ${fmtDate(je.je_date)} · ${badge(je.type)}
+            ${je.export_batch_number ? `<span class="badge badge-gray" title="Exported to ERP in this batch">📤 ${esc(je.export_batch_number)}</span>` : ''}
             <span style="color:var(--text-muted);font-size:12.5px;margin-left:6px">${esc(je.narration || '')}</span></div>
           <span style="color:var(--text-muted);font-size:12px">${esc(je.created_by_name || 'System')}</span>
         </div>
@@ -1676,14 +1675,25 @@ async function renderJournal(main) {
             </tr>`).join('')}
           </tbody>
         </table></div>
-      </div>`).join('') : '<div class="card empty-state">No journal entries for this filter</div>';
+      </div>`).join('') : '<div class="card empty-state">No journal entries here</div>';
   };
   main.innerHTML = `
     <div class="page-header">
       <div><h2>Journal Entries</h2><div class="sub">Auto-posted from invoice bookings, payments and tax deposits</div></div>
-      <div id="je-export" style="display:flex;gap:8px"></div>
+      <div style="display:flex;gap:8px">
+        ${canExport ? `<button class="btn btn-sm" id="je-history">📋 Export history</button>
+        <button class="btn btn-primary btn-sm" id="je-export-batch">📤 Export to ERP</button>` : ''}
+      </div>
     </div>
+    <p style="color:var(--text-muted);font-size:12.5px;margin-bottom:12px">
+      Exporting stamps entries into a batch so they can't be posted to your accounting system twice.
+      Already-exported entries move to <strong>Export history</strong>, where a batch can be re-downloaded if a file was lost.</p>
     <div class="toolbar">
+      <select id="je-status">
+        <option value="ready">Ready to export</option>
+        <option value="exported">Exported</option>
+        <option value="">All</option>
+      </select>
       <select id="je-type">
         <option value="">All types</option>
         ${['invoice_booking', 'payment', 'tds_deposit', 'rcm_deposit'].map((t) => `<option value="${t}">${t.replace(/_/g, ' ')}</option>`).join('')}
@@ -1692,9 +1702,80 @@ async function renderJournal(main) {
       <button class="btn btn-sm" id="je-apply">Apply</button>
     </div>
     <div id="je-list"></div>`;
-  const readFilters = () => ({ type: $('#je-type').value, from: $('#je-from').value, to: $('#je-to').value });
+  const readFilters = () => ({ export_status: $('#je-status').value, type: $('#je-type').value, from: $('#je-from').value, to: $('#je-to').value });
   $('#je-apply').addEventListener('click', () => draw(readFilters()));
-  await draw({});
+  $('#je-status').addEventListener('change', () => draw(readFilters()));
+  if (canExport) {
+    $('#je-export-batch').addEventListener('click', openExportBatchModal);
+    $('#je-history').addEventListener('click', openExportHistoryModal);
+  }
+  await draw({ export_status: 'ready' });
+}
+
+// download an attachment-response URL without navigating the SPA away
+function triggerDownload(url) {
+  const a = document.createElement('a');
+  a.href = url;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function openExportBatchModal() {
+  openModal('Export journals to ERP', `
+    <p style="color:var(--text-muted);font-size:12.5px;margin-bottom:14px">
+      Creates a batch of every entry not yet exported (optionally only those on/before a cut-off date,
+      e.g. month-end). Those entries then move to Export history and won't be exported again.</p>
+    <form id="export-batch-form">
+      <div class="form-grid">
+        <div class="field"><label>Include entries through <span style="color:var(--text-muted);font-weight:400">(optional cut-off)</span></label>
+          <input name="through_date" type="date"></div>
+        <div class="field"><label>Format</label>
+          <select name="format"><option value="csv">CSV</option><option value="xlsx">Excel</option></select></div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create batch &amp; download</button>
+      </div>
+    </form>`);
+  $('#export-batch-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      const batch = await api('/journal/export-batch', { method: 'POST', body: { through_date: f.through_date || '' } });
+      triggerDownload(`/api/journal/batches/${batch.id}/download?format=${f.format}&token=${encodeURIComponent(TOKEN)}`);
+      toast(`Batch ${batch.batch_number} created — ${batch.je_count} entries exported`, 'success');
+      closeModal();
+      route();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+}
+
+async function openExportHistoryModal() {
+  const batches = await api('/journal/batches');
+  openModal('Journal export history', `
+    <p style="color:var(--text-muted);font-size:12.5px;margin-bottom:14px">
+      Each batch is a permanent record of journals handed to your accounting system.
+      Re-download only if the original file was lost — re-importing posts duplicates.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Batch</th><th>When</th><th>By</th><th class="num">Entries</th><th class="num">Debit</th><th class="num">Credit</th><th>Through</th><th></th></tr></thead>
+      <tbody>${batches.length ? batches.map((b) => `
+        <tr>
+          <td><strong>${esc(b.batch_number)}</strong></td>
+          <td>${fmtDate(b.created_at)}</td>
+          <td>${esc(b.created_by_name || '—')}</td>
+          <td class="num">${b.je_count}</td>
+          <td class="num">${fmtMoney(b.total_debit)}</td>
+          <td class="num">${fmtMoney(b.total_credit)}</td>
+          <td>${b.through_date ? fmtDate(b.through_date) : 'all'}</td>
+          <td style="white-space:nowrap">
+            <a class="link" href="/api/journal/batches/${b.id}/download?format=csv&token=${encodeURIComponent(TOKEN)}">CSV</a> ·
+            <a class="link" href="/api/journal/batches/${b.id}/download?format=xlsx&token=${encodeURIComponent(TOKEN)}">Excel</a>
+          </td>
+        </tr>`).join('') : '<tr><td colspan="8" class="empty-state">No exports yet</td></tr>'}
+      </tbody>
+    </table></div>
+    <div class="form-actions"><button type="button" class="btn" onclick="closeModal()">Close</button></div>`);
 }
 
 // ---------- TDS & RCM deposits ----------
@@ -1868,14 +1949,23 @@ async function renderStatements(main) {
         <option value="">Select vendor…</option>
         ${vendors.map((v) => `<option value="${v.id}">${esc(v.name)} (${esc(v.code)})</option>`).join('')}
       </select>
+      <select id="stmt-view">
+        <option value="outstanding">Outstanding only</option>
+        <option value="full">Full ledger</option>
+      </select>
       <span id="stmt-export"></span>
     </div>
     <div id="stmt-body"><div class="card empty-state">Select a vendor to view their statement</div></div>`;
-  $('#stmt-vendor').addEventListener('change', async (e) => {
-    if (!e.target.value) return;
-    const d = await api(`/vendors/${e.target.value}/statement`);
-    $('#stmt-export').innerHTML = `<a class="btn btn-sm" href="/api/vendors/${e.target.value}/statement?format=csv&token=${encodeURIComponent(TOKEN)}">⬇ CSV</a>`;
+  const load = async () => {
+    const vid = $('#stmt-vendor').value;
+    if (!vid) { $('#stmt-body').innerHTML = '<div class="card empty-state">Select a vendor to view their statement</div>'; $('#stmt-export').innerHTML = ''; return; }
+    const view = $('#stmt-view').value;
+    const viewQs = view === 'full' ? '&view=full' : '';
+    const d = await api(`/vendors/${vid}/statement${view === 'full' ? '?view=full' : ''}`);
+    $('#stmt-export').innerHTML = `<a class="btn btn-sm" href="/api/vendors/${vid}/statement?format=csv&token=${encodeURIComponent(TOKEN)}${viewQs}">⬇ CSV</a>`;
+    const emptyMsg = view === 'full' ? 'No ledger activity for this vendor' : 'Nothing outstanding — this vendor is fully settled';
     $('#stmt-body').innerHTML = `
+      ${view === 'outstanding' ? '<p style="color:var(--text-muted);font-size:12.5px;margin-bottom:10px">Showing only invoices still owed. Switch to <strong>Full ledger</strong> to include settled invoices.</p>' : ''}
       <div class="card table-wrap"><table>
         <thead><tr><th>Date</th><th>JE</th><th>Type</th><th>Narration</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Balance owed</th></tr></thead>
         <tbody>${d.lines.length ? d.lines.map((l) => `
@@ -1887,11 +1977,13 @@ async function renderStatements(main) {
             <td class="num">${l.debit ? fmtMoney(l.debit) : ''}</td>
             <td class="num">${l.credit ? fmtMoney(l.credit) : ''}</td>
             <td class="num">${fmtMoney(l.balance)}</td>
-          </tr>`).join('') : '<tr><td colspan="7" class="empty-state">No ledger activity for this vendor</td></tr>'}
+          </tr>`).join('') : `<tr><td colspan="7" class="empty-state">${emptyMsg}</td></tr>`}
         </tbody>
         ${d.lines.length ? `<tfoot><tr style="background:var(--surface-2);font-weight:700"><td colspan="6">Closing balance owed to ${esc(d.vendor.name)}</td><td class="num">${fmtMoney(d.balance)}</td></tr></tfoot>` : ''}
       </table></div>`;
-  });
+  };
+  $('#stmt-vendor').addEventListener('change', load);
+  $('#stmt-view').addEventListener('change', load);
 }
 
 // ---------- tax settings (admin) ----------

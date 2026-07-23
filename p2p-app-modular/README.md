@@ -207,9 +207,17 @@ Every action is recorded in an audit log shown on the dashboard.
   period must also be a valid YYYY-MM month.
 - **Journal entries** are auto-posted, immutable and balanced: booking (AP
   credited **gross** with TDS as a separate AP debit line), payment, and tax
-  deposits. Export as CSV or Excel from the Journal page.
-- **Vendor statements**: per-vendor AP ledger showing invoices, TDS deductions
-  and payments with a running balance (CSV export).
+  deposits.
+- **Journal export to your ERP** is export-once: the Journal page defaults to a
+  "Ready to export" queue, and exporting stamps those entries into an immutable
+  **batch** (CSV or Excel) so they drop out of the queue and can never be posted
+  to the accounting system twice. An optional through-date scopes a month-end
+  run. Past batches live under **Export history** and stay re-downloadable
+  (finance/admin) purely as a recovery path if a file was lost.
+- **Vendor statements**: per-vendor AP ledger. The default **Outstanding only**
+  view hides invoices that are fully paid so finance sees just what is still
+  owed; a **Full ledger** toggle shows every booking, TDS deduction and payment
+  with a running balance. Either view exports to CSV.
 - **TDS & RCM deposits**: month/section-wise liability vs challans (challan no.,
   BSR code); recording a challan posts the deposit JE.
 - **GSTR-2B reconciliation**: upload the 2B CSV per registration per period

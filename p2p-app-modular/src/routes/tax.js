@@ -155,11 +155,13 @@ module.exports = function register(app) {
 
   // ---------- journal entries ----------
   const JE_SQL = `
-    SELECT je.*, u.full_name AS created_by_name
-    FROM journal_entries je LEFT JOIN users u ON u.id = je.created_by`;
+    SELECT je.*, u.full_name AS created_by_name, b.batch_number AS export_batch_number
+    FROM journal_entries je
+    LEFT JOIN users u ON u.id = je.created_by
+    LEFT JOIN journal_export_batches b ON b.id = je.export_batch_id`;
 
-  async function journalWithLines(where, params) {
-    const entries = await db.prepare(`${JE_SQL} ${where} ORDER BY je.je_date DESC, je.id DESC LIMIT 500`).all(...params);
+  async function journalWithLines(where, params, { order = 'je.je_date DESC, je.id DESC', limit = 500 } = {}) {
+    const entries = await db.prepare(`${JE_SQL} ${where} ORDER BY ${order}${limit ? ` LIMIT ${limit}` : ''}`).all(...params);
     const getLines = db.prepare(`
       SELECT jl.*, v.name AS vendor_name, cg.label AS gstin_label
       FROM journal_lines jl
@@ -175,6 +177,9 @@ module.exports = function register(app) {
     if (q.type) { conds.push('je.type = ?'); params.push(q.type); }
     if (q.from) { conds.push('je.je_date >= ?'); params.push(q.from); }
     if (q.to) { conds.push('je.je_date <= ?'); params.push(q.to); }
+    // export_status: ready = not yet exported, exported = already batched
+    if (q.export_status === 'ready') conds.push('je.export_batch_id IS NULL');
+    else if (q.export_status === 'exported') conds.push('je.export_batch_id IS NOT NULL');
     return { where: conds.length ? 'WHERE ' + conds.join(' AND ') : '', params };
   }
 
@@ -183,21 +188,18 @@ module.exports = function register(app) {
     res.json(await journalWithLines(where, params));
   }));
 
-  // export via <a href> — accepts ?token= like the attachment endpoint
-  app.get('/api/journal/export', wrap(async (req, res) => {
-    const token = bearerToken(req) || req.query.token;
-    let payload;
-    try { payload = jwt.verify(token || '', JWT_SECRET); }
-    catch { return res.status(401).json({ error: 'Authentication required' }); }
-    if (payload.kind !== 'staff') return res.status(403).json({ error: 'Not a staff session' });
+  // generic, ERP-agnostic layout — Tally/SUN6/Dynamics/etc. each re-map these
+  // columns in their own import step rather than needing one hardcoded format
+  const EXPORT_HEADERS = ['je_number', 'je_date', 'gl_period', 'type', 'narration', 'account_code', 'account_name', 'gl_account_code',
+    'debit', 'credit', 'vendor', 'gstin', 'tds_section', 'sub_location', 'cost_centre', 'program_product_code', 'gl_description',
+    'custom_field_1', 'custom_field_2', 'custom_field_3', 'custom_field_4', 'custom_field_5'];
 
-    const { where, params } = journalFilters(req.query);
-    const entries = await journalWithLines(where, params);
+  function journalExportRows(entries) {
     const rows = [];
     for (const je of entries) {
       for (const l of je.lines) {
         rows.push({
-          je_number: je.je_number, je_date: je.je_date, type: je.type, gl_period: je.gl_period || '', narration: je.narration || '',
+          je_number: je.je_number, je_date: je.je_date, gl_period: je.gl_period || '', type: je.type, narration: je.narration || '',
           account_code: l.account_code, account_name: l.account_name, gl_account_code: l.gl_account_code || '',
           debit: l.debit, credit: l.credit,
           vendor: l.vendor_name || '', gstin: l.gstin_label || '', tds_section: l.tds_section || '',
@@ -208,43 +210,99 @@ module.exports = function register(app) {
         });
       }
     }
-    // generic, ERP-agnostic layout — Tally/SUN6/Dynamics/etc. each re-map these
-    // columns in their own import step rather than needing one hardcoded format
-    const headers = ['je_number', 'je_date', 'gl_period', 'type', 'narration', 'account_code', 'account_name', 'gl_account_code',
-      'debit', 'credit', 'vendor', 'gstin', 'tds_section', 'sub_location', 'cost_centre', 'program_product_code', 'gl_description',
-      'custom_field_1', 'custom_field_2', 'custom_field_3', 'custom_field_4', 'custom_field_5'];
+    return rows;
+  }
 
-    if (req.query.format === 'xlsx') {
+  async function streamJournalFile(res, rows, filename, format) {
+    if (format === 'xlsx') {
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('Journal');
-      ws.columns = headers.map((h) => ({ header: h.replace(/_/g, ' ').toUpperCase(), key: h, width: h === 'narration' || h === 'account_name' ? 34 : 16 }));
+      ws.columns = EXPORT_HEADERS.map((h) => ({ header: h.replace(/_/g, ' ').toUpperCase(), key: h, width: h === 'narration' || h === 'account_name' ? 34 : 16 }));
       ws.getRow(1).font = { bold: true };
       rows.forEach((r) => ws.addRow(r));
       ws.getColumn('debit').numFmt = '#,##0.00';
       ws.getColumn('credit').numFmt = '#,##0.00';
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', 'attachment; filename="journal-export.xlsx"');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}.xlsx"`);
       await wb.xlsx.write(res);
       return res.end();
     }
     const csvEsc = (v) => `"${String(v).replace(/"/g, '""')}"`;
-    const csv = [headers.join(','), ...rows.map((r) => headers.map((h) => csvEsc(r[h])).join(','))].join('\n');
+    const csv = [EXPORT_HEADERS.join(','), ...rows.map((r) => EXPORT_HEADERS.map((h) => csvEsc(r[h])).join(','))].join('\n');
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="journal-export.csv"');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
     res.send(csv);
+  }
+
+  // Create an export batch: stamp every not-yet-exported entry (optionally only
+  // those on/before through_date) so they drop out of the "ready" queue and can
+  // never be handed to the ERP twice by accident. Returns the batch to download.
+  app.post('/api/journal/export-batch', requireAuth, requireRole('finance'), wrap(async (req, res) => {
+    const throughDate = (req.body.through_date || '').trim() || null;
+    if (throughDate && !/^\d{4}-\d{2}-\d{2}$/.test(throughDate)) throw new Error('Through-date must be YYYY-MM-DD');
+    const batch = await db.tx(async () => {
+      const cond = throughDate ? 'export_batch_id IS NULL AND je_date <= ?' : 'export_batch_id IS NULL';
+      const idParams = throughDate ? [throughDate] : [];
+      const ids = (await db.prepare(`SELECT id FROM journal_entries WHERE ${cond} ORDER BY id`).all(...idParams)).map((r) => r.id);
+      if (!ids.length) throw new Error('Nothing to export — all journal entries in range are already in a batch');
+      const ph = ids.map(() => '?').join(',');
+      const tot = await db.prepare(`SELECT COALESCE(SUM(debit),0) AS dr, COALESCE(SUM(credit),0) AS cr FROM journal_lines WHERE je_id IN (${ph})`).get(...ids);
+      const batchNumber = await nextNumber('EXP', 'journal_export_batches', 'batch_number');
+      const batchId = (await db.prepare(`INSERT INTO journal_export_batches (batch_number, je_count, total_debit, total_credit, through_date, created_by)
+        VALUES (?,?,?,?,?,?)`).run(batchNumber, ids.length, tot.dr, tot.cr, throughDate, req.user.id)).lastInsertRowid;
+      await db.prepare(`UPDATE journal_entries SET export_batch_id = ? WHERE id IN (${ph})`).run(batchId, ...ids);
+      return { id: batchId, batch_number: batchNumber, je_count: ids.length, total_debit: tot.dr, total_credit: tot.cr };
+    });
+    audit(req.user.id, 'export', 'journal_batch', batch.id, `${batch.batch_number} (${batch.je_count} entries)`);
+    res.status(201).json(batch);
+  }));
+
+  // Exported-batch history (finance/admin) — the record of what has gone to the ERP
+  app.get('/api/journal/batches', requireAuth, requireRole('finance'), wrap(async (req, res) => {
+    res.json(await db.prepare(`SELECT b.*, u.full_name AS created_by_name
+      FROM journal_export_batches b LEFT JOIN users u ON u.id = b.created_by
+      ORDER BY b.id DESC`).all());
+  }));
+
+  // Re-download a batch's file — the immutable recovery path from history.
+  // Token via header or ?token= (for plain <a href> links), finance/admin only.
+  app.get('/api/journal/batches/:id/download', wrap(async (req, res) => {
+    const token = bearerToken(req) || req.query.token;
+    let payload;
+    try { payload = jwt.verify(token || '', JWT_SECRET); }
+    catch { return res.status(401).json({ error: 'Authentication required' }); }
+    if (payload.kind !== 'staff' || !['finance', 'admin'].includes(payload.role)) {
+      return res.status(403).json({ error: 'Only finance or admin can download journal batches' });
+    }
+    const batch = await db.prepare('SELECT * FROM journal_export_batches WHERE id = ?').get(req.params.id);
+    if (!batch) return res.status(404).json({ error: 'Batch not found' });
+    const entries = await journalWithLines('WHERE je.export_batch_id = ?', [batch.id],
+      { order: 'je.je_date, je.id', limit: null });
+    audit(payload.sub, 're-download', 'journal_batch', batch.id, batch.batch_number);
+    await streamJournalFile(res, journalExportRows(entries), `journal-${batch.batch_number}`, req.query.format);
   }));
 
   // ---------- vendor statement (AP ledger per vendor) ----------
+  // Default view hides ledger lines that belong to fully-paid invoices, so
+  // finance sees only what is still owed; view=full shows the complete ledger.
+  // Each AP line is traced to its invoice — directly (booking JE) or via its
+  // payment (payment JE) — to know whether that invoice is settled.
   app.get('/api/vendors/:id/statement', requireAuth, requireRole('finance', 'procurement'), wrap(async (req, res) => {
     const vendor = await db.prepare('SELECT * FROM vendors WHERE id = ?').get(req.params.id);
     if (!vendor) return res.status(404).json({ error: 'Vendor not found' });
-    const lines = await db.prepare(`
+    const full = req.query.view === 'full';
+    let lines = await db.prepare(`
       SELECT jl.debit, jl.credit, jl.tds_section, jl.account_name,
-             je.je_number, je.je_date, je.type, je.narration
+             je.je_number, je.je_date, je.type, je.narration,
+             COALESCE(inv_direct.status, inv_via_pay.status) AS invoice_status
       FROM journal_lines jl
       JOIN journal_entries je ON je.id = jl.je_id
+      LEFT JOIN invoices inv_direct ON je.ref_type = 'invoice' AND inv_direct.id = je.ref_id
+      LEFT JOIN payments pay ON je.ref_type = 'payment' AND pay.id = je.ref_id
+      LEFT JOIN invoices inv_via_pay ON inv_via_pay.id = pay.invoice_id
       WHERE jl.vendor_id = ? AND jl.account_code = '2100'
       ORDER BY je.je_date, je.id, jl.line_no`).all(vendor.id);
+    if (!full) lines = lines.filter((l) => l.invoice_status !== 'paid');
     let balance = 0;
     for (const l of lines) {
       balance = r2(balance + l.credit - l.debit); // credit balance = amount we owe
@@ -255,10 +313,10 @@ module.exports = function register(app) {
       const csv = ['date,je_number,type,narration,debit,credit,balance',
         ...lines.map((l) => [l.je_date, l.je_number, l.type, l.narration, l.debit, l.credit, l.balance].map(csvEsc).join(','))].join('\n');
       res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename="statement-${vendor.code}.csv"`);
+      res.setHeader('Content-Disposition', `attachment; filename="statement-${vendor.code}-${full ? 'full' : 'outstanding'}.csv"`);
       return res.send(csv);
     }
-    res.json({ vendor: { id: vendor.id, code: vendor.code, name: vendor.name }, lines, balance });
+    res.json({ vendor: { id: vendor.id, code: vendor.code, name: vendor.name }, lines, balance, view: full ? 'full' : 'outstanding' });
   }));
 
   // ---------- TDS / RCM deposits ----------

@@ -499,8 +499,10 @@ test('GL integration: mandatory GST fields, due-date auto-calc, GL codes flow on
     assert.equal(l.custom_field_1, 'PRJ-42');
   }
 
-  // CSV export carries the new GL columns
-  const exportRes = await call('GET', `/api/journal/export?token=${encodeURIComponent(rahul)}`);
+  // exporting a batch and re-downloading it carries the new GL columns
+  const batchRes = await call('POST', '/api/journal/export-batch', { token: rahul, body: {} });
+  assert.equal(batchRes.status, 201, batchRes.text);
+  const exportRes = await call('GET', `/api/journal/batches/${batchRes.json.id}/download?token=${encodeURIComponent(rahul)}`);
   assert.equal(exportRes.status, 200);
   assert.match(exportRes.text, /gl_account_code/);
   assert.match(exportRes.text, /AP-GLTEST/);
@@ -864,4 +866,92 @@ test('AP controls: duplicate invoices blocked, GL period lock, TDS rate discipli
   });
   assert.equal(withReason.status, 200, withReason.text);
   assert.equal(withReason.json.tdsAmount, 50); // 1000 @ 5%
+});
+
+test('journal export: batching moves entries to history, blocks double-export, re-download works', async () => {
+  const priya = await login('priya', 'priya123');
+  const rahul = await login('rahul', 'rahul123');
+  const sneha = await login('sneha', 'sneha123');
+  const meera = await login('meera', 'meera123');
+
+  // guarantee at least one ready (un-exported) journal entry
+  const po = await call('POST', '/api/pos', {
+    token: priya, body: { vendor_id: vendorId, company_gstin_id: 1, items: [{ description: 'Svc', quantity: 1, unit: 'EA', unit_price: 1500 }] },
+  });
+  const inv = await call('POST', '/api/invoices', {
+    token: sneha, body: { po_id: po.json.id, invoice_date: '2026-09-01', subtotal: 1500, cgst_amount: 0, sgst_amount: 0 },
+  });
+  await call('POST', `/api/invoices/${inv.json.id}/approve`, { token: rahul, body: {} }); // level 1
+  const fin = await call('POST', `/api/invoices/${inv.json.id}/approve`, { token: rahul, body: { itc_eligibility: 'eligible' } });
+  assert.equal(fin.status, 200, fin.text);
+
+  const readyBefore = (await call('GET', '/api/journal?export_status=ready', { token: rahul })).json;
+  assert.ok(readyBefore.length > 0, 'there are entries ready to export');
+
+  // an approver (not finance) may neither export nor see the batch history
+  assert.equal((await call('POST', '/api/journal/export-batch', { token: meera, body: {} })).status, 403);
+  assert.equal((await call('GET', '/api/journal/batches', { token: meera })).status, 403);
+
+  // export creates a batch that captures every ready entry
+  const batch = await call('POST', '/api/journal/export-batch', { token: rahul, body: {} });
+  assert.equal(batch.status, 201, batch.text);
+  assert.equal(batch.json.je_count, readyBefore.length);
+
+  // those entries are no longer ready; a second export finds nothing to send
+  assert.equal((await call('GET', '/api/journal?export_status=ready', { token: rahul })).json.length, 0);
+  const again = await call('POST', '/api/journal/export-batch', { token: rahul, body: {} });
+  assert.equal(again.status, 400);
+  assert.match(again.json.error, /nothing to export/i);
+
+  // the batch is in history and re-downloadable (the recovery path)
+  const batches = await call('GET', '/api/journal/batches', { token: rahul });
+  assert.ok(batches.json.some((b) => b.id === batch.json.id), 'batch appears in history');
+  const dl = await call('GET', `/api/journal/batches/${batch.json.id}/download?format=csv&token=${encodeURIComponent(rahul)}`);
+  assert.equal(dl.status, 200);
+  assert.match(dl.text, /je_number/);
+});
+
+test('vendor statement: outstanding view hides fully-paid invoices, full view shows them', async () => {
+  const priya = await login('priya', 'priya123');
+  const rahul = await login('rahul', 'rahul123');
+  const sneha = await login('sneha', 'sneha123');
+  const admin = await login('admin', 'admin123');
+
+  // a fresh vendor with exactly one invoice, which we settle in full
+  const vc = await call('POST', '/api/vendors', {
+    token: priya, body: { name: 'Statement Vendor', pan: 'AABCT9090F', bank_name: 'B', bank_account: '9', ifsc: 'TEST0000009' },
+  });
+  const vid = vc.json.id;
+  for (const dt of ['pan', 'cancelled_cheque']) {
+    const f = new FormData(); f.append('doc_type', dt); f.append('file', pdfBlob(), 'd.pdf');
+    await call('POST', `/api/vendors/${vid}/documents`, { token: priya, form: f });
+  }
+  await call('POST', `/api/vendors/${vid}/verify`, { token: rahul, body: { ap_account_code: 'AP-STMT' } });
+  const po = await call('POST', '/api/pos', {
+    token: priya, body: { vendor_id: vid, company_gstin_id: 1, items: [{ description: 'Svc', quantity: 1, unit: 'EA', unit_price: 2000 }] },
+  });
+  const inv = await call('POST', '/api/invoices', {
+    token: sneha, body: { po_id: po.json.id, invoice_date: '2026-09-05', subtotal: 2000, cgst_amount: 0, sgst_amount: 0 },
+  });
+  await call('POST', `/api/invoices/${inv.json.id}/approve`, { token: rahul, body: {} }); // level 1
+  await call('POST', `/api/invoices/${inv.json.id}/approve`, { token: rahul, body: { itc_eligibility: 'eligible' } }); // final, no TDS -> net 2000
+
+  // before payment: the unpaid invoice shows in the outstanding view
+  const before = await call('GET', `/api/vendors/${vid}/statement`, { token: rahul });
+  assert.equal(before.json.view, 'outstanding');
+  assert.ok(before.json.lines.length > 0, 'unpaid invoice appears while outstanding');
+  assert.equal(before.json.balance, 2000);
+
+  // settle it in full (maker rahul prepares, checker admin releases)
+  const pay = await call('POST', '/api/payments', { token: rahul, body: { invoice_id: inv.json.id, amount: 2000 } });
+  assert.equal(pay.status, 201, pay.text);
+  assert.equal((await call('POST', `/api/payments/${pay.json.id}/release`, { token: admin, body: {} })).status, 200);
+
+  // now the outstanding view hides it entirely; the full ledger still keeps it
+  const afterOut = await call('GET', `/api/vendors/${vid}/statement`, { token: rahul });
+  assert.equal(afterOut.json.lines.length, 0, 'settled invoice hidden from outstanding view');
+  assert.equal(afterOut.json.balance, 0);
+  const afterFull = await call('GET', `/api/vendors/${vid}/statement?view=full`, { token: rahul });
+  assert.equal(afterFull.json.view, 'full');
+  assert.ok(afterFull.json.lines.length >= 2, 'full ledger keeps booking + payment lines');
 });
