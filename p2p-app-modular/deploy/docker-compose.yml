@@ -71,6 +71,10 @@ services:
         condition: service_healthy
     environment:
       - NODE_ENV=production
+      # set to 1 in .env when serving plain HTTP (no TLS proxy in front),
+      # otherwise the browser upgrades /css and /js to https:// and the app
+      # loads unstyled with a blank screen after login
+      - INSECURE_HTTP=${INSECURE_HTTP:-}
       - JWT_SECRET=${JWT_SECRET}
       - MODULES=${MODULES:-all}
       - DATABASE_URL=postgres://p2p:${POSTGRES_PASSWORD}@postgres:5432/p2p
